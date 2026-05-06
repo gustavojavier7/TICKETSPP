@@ -49,4 +49,8 @@ create_or_update_label "solicitante:gustavo-lopez" "C5DEF5" "Solicitante Gustavo
 create_or_update_label "escalamiento:respuesta-proveedor-recibida" "F9D0C4" "Proveedor respondió"
 create_or_update_label "escalamiento:requiere-reemplazos" "F9D0C4" "Requiere reemplazo de partes"
 
+create_or_update_label "escalamiento:visita-en-sitio" "F9D0C4" "Requiere visita técnica"
+create_or_update_label "escalamiento:capex" "F9D0C4" "Requiere presupuesto CAPEX"
+create_or_update_label "escalamiento:bloqueado-tercero" "F9D0C4" "Bloqueado por tercero"
+
 echo "✅ Labels sincronizados en $REPO"
