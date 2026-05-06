@@ -8,14 +8,9 @@ create_or_update_label () {
   local color="$2"
   local desc="$3"
 
-  local existing_name
-  existing_name=$(gh label list --repo "$REPO" --limit 500 --json name \
-    -q ".[] | select((.name | ascii_downcase) == ("${name}" | ascii_downcase)) | .name" \
-    | head -n 1)
-
-  if [[ -n "$existing_name" ]]; then
-    gh label edit "$existing_name" --repo "$REPO" --name "$name" --color "$color" --description "$desc" >/dev/null
-    echo "Updated: $existing_name -> $name"
+  if gh label list --repo "$REPO" --limit 500 --json name -q '.[].name' | grep -Fxq "$name"; then
+    gh label edit "$name" --repo "$REPO" --color "$color" --description "$desc" >/dev/null
+    echo "Updated: $name"
   else
     gh label create "$name" --repo "$REPO" --color "$color" --description "$desc" >/dev/null
     echo "Created: $name"
