@@ -1,28 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ge 1 ]]; then
-  REPO="$1"
-else
-  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
-  if [[ -z "$REPO" ]]; then
-    echo "Error: could not determine repository automatically. Pass owner/repo as first argument." >&2
-    exit 1
-  fi
-fi
+REPO="${1:-gustavojavier7/TICKETSPP}"
 
 create_or_update_label () {
   local name="$1"
   local color="$2"
   local desc="$3"
 
-  local existing_name
-  existing_name=$(gh label list --repo "$REPO" --limit 500 --json name -q '.[].name' \
-    | awk -v target="$name" 'tolower($0)==tolower(target){print; exit}')
-
-  if [[ -n "$existing_name" ]]; then
-    gh label edit "$existing_name" --repo "$REPO" --name "$name" --color "$color" --description "$desc" >/dev/null
-    echo "Updated: $existing_name -> $name"
+  if gh label list --repo "$REPO" --limit 500 --json name -q '.[].name' | grep -Fxq "$name"; then
+    gh label edit "$name" --repo "$REPO" --color "$color" --description "$desc" >/dev/null
+    echo "Updated: $name"
   else
     gh label create "$name" --repo "$REPO" --color "$color" --description "$desc" >/dev/null
     echo "Created: $name"

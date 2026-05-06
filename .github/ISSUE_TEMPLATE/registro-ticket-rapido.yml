@@ -9,24 +9,14 @@ body:
         Complete los campos obligatorios para registrar el ticket operativo.
 
   - type: dropdown
-    id: tipo_solicitud
-    attributes:
-      label: Tipo de solicitud
-      options:
-        - Registrar ticket rápido
-      default: 0
-    validations:
-      required: true
-
-  - type: dropdown
     id: solicitante
     attributes:
       label: Solicitante
       options:
-        - Evelin Sosa
-        - Jennifer Castilla
-        - Jesús Martín
         - Gustavo López
+        - Jennifer Castilla
+        - Evelin Sosa
+        - Jesús Martín
     validations:
       required: true
 
@@ -35,11 +25,9 @@ body:
     attributes:
       label: Sistema afectado
       options:
-        - DIGIFORT
         - HIKVISION
+        - DIGIFORT
         - CCURE
-        - WINDOWS
-        - REDES
     validations:
       required: true
 
@@ -73,9 +61,9 @@ body:
       description: "Campo administrativo."
       options:
         - ABIERTO
-        - CERRADO
-        - ESPERANDO RESPUESTA
         - EN CURSO
+        - ESPERANDO RESPUESTA
+        - CERRADO
       default: 0
     validations:
       required: true
@@ -87,12 +75,36 @@ body:
       options:
         - label: Respuesta del Proveedor recibida
         - label: Requiere reemplazos
+        - label: Requiere visita en sitio
+        - label: Requiere CAPEX
+        - label: Bloqueado por tercero
 
   - type: textarea
     id: detalles_notas
     attributes:
       label: Detalles o notas
       placeholder: "Ej: Cableado obsoleto. Se incluye en CAPEX 2026."
+
+  - type: input
+    id: link_referencia
+    attributes:
+      label: Link
+      description: "URL de referencia (opcional)."
+      placeholder: "https://..."
+
+  - type: input
+    id: id_ticket_externo
+    attributes:
+      label: ID Ticket
+      description: "Ej: PP-0005 (si existe en sistema externo)."
+      placeholder: "PP-0000"
+
+  - type: input
+    id: estado_anterior
+    attributes:
+      label: Estado Anterior
+      description: "Solo para uso administrativo/histórico."
+      placeholder: "ABIERTO / EN CURSO / ESPERANDO RESPUESTA / CERRADO"
 
   - type: markdown
     attributes:
