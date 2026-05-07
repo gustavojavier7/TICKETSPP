@@ -96,3 +96,105 @@ jobs:
             }
 
             core.info(`Checked: ${checked}; Reminded: ${reminded}`);
+
+  codex-review:
+    runs-on: ubuntu-latest
+    needs: remind
+    steps:
+      - name: Codex Review - Análisis de Inactividad
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const DAY_MS = 24 * 60 * 60 * 1000;
+            const HOUR_MS = 60 * 60 * 1000;
+            const now = Date.now();
+            const PAUSE_MS = 14 * DAY_MS;
+            const CODEX_MARKER = 'codex-review-inactivity-v1';
+
+            const cfg = {
+              'prioridad:urgente': { inactivityMs: 24 * HOUR_MS },
+              'prioridad:alta':    { inactivityMs: 48 * HOUR_MS },
+              'prioridad:media':   { inactivityMs: 7 * DAY_MS },
+              'prioridad:baja':    { inactivityMs: 28 * DAY_MS },
+            };
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            let analyzed = 0;
+            let reviewed = 0;
+
+            for (const issue of issues) {
+              if (issue.pull_request) continue;
+              analyzed++;
+
+              const labels = (issue.labels || []).map(l => typeof l === 'string' ? l : l.name).filter(Boolean);
+              if (labels.includes('estado:cerrado') || labels.includes('estado:esperando-respuesta')) continue;
+
+              const priorityLabel = Object.keys(cfg).find(k => labels.includes(k));
+              if (!priorityLabel) continue;
+
+              const { inactivityMs } = cfg[priorityLabel];
+              const lastUpdatedMs = new Date(issue.updated_at).getTime();
+              const inactiveFor = now - lastUpdatedMs;
+              if (inactiveFor < inactivityMs) continue;
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                per_page: 100,
+              });
+
+              // Evitar duplicar comentarios de Codex Review en 3 días
+              const codexComments = comments
+                .filter(c => (c.body || '').includes(CODEX_MARKER))
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+              const lastCodexReview = codexComments[0];
+              if (lastCodexReview) {
+                const reviewPauseMs = 3 * DAY_MS;
+                const pauseUntil = new Date(lastCodexReview.created_at).getTime() + reviewPauseMs;
+                if (now < pauseUntil) continue;
+              }
+
+              // Calcular días de inactividad
+              const daysInactive = Math.floor(inactiveFor / DAY_MS);
+              const formattedDate = new Date(issue.updated_at).toLocaleDateString('es-ES');
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: [
+                  `<!-- ${CODEX_MARKER} -->`,
+                  '🤖 **Revisado por Codex Review**',
+                  '',
+                  `**Estado:** Inactividad detectada`,
+                  `**Último cambio:** ${formattedDate}`,
+                  `**Días sin actividad:** ${daysInactive}`,
+                  `**Prioridad:** ${priorityLabel}`,
+                  '',
+                  '### Análisis',
+                  `- ✅ Issue bien definido: "${issue.title}"`,
+                  `- 📊 Descripción disponible: ${issue.body ? '✓' : '✗'}`,
+                  `- 🏷️ Etiquetas asignadas: ${labels.length > 0 ? labels.join(', ') : 'Ninguna'}`,
+                  '',
+                  '### Acciones sugeridas',
+                  '1. 📝 Actualizar el estado del Issue si continúa siendo relevante',
+                  '2. 👤 Asignar a un responsable si requiere acción inmediata',
+                  '3. ✅ Cerrar el Issue si ya no aplica',
+                  '4. 💬 Dejar un comentario para reactivar el ticket',
+                  '',
+                  `*Revisión automática realizada el ${new Date().toLocaleDateString('es-ES')} por Codex Review Agent*`
+                ].join('\n')
+              });
+
+              reviewed++;
+            }
+
+            core.info(`Codex Review - Analyzed: ${analyzed}; Reviewed: ${reviewed}`);
