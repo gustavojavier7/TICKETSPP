@@ -1,190 +1,101 @@
-# Configuración de Agentes - TICKETSPP
+# AGENTS.md — TICKETSPP
 
-## Agente: Codex Review - Análisis de Inactividad
+## Propósito del repositorio
 
-### Descripción General
-Este agente analiza automáticamente el periodo de inactividad de los Issues en el repositorio y envía un comentario de revisión cuando detecta inactividad significativa.
+Este repositorio no debe tratarse principalmente como una base de código tradicional.
 
-### Objetivo
-- Detectar Issues inactivos
-- Realizar revisión automática
-- Notificar al equipo con un comentario estándar de Codex Review
+TICKETSPP es un sistema operativo de tickets para gestión de incidentes, tareas y seguimiento de infraestructura de CCTV, control de acceso y sistemas asociados en planta.
 
----
+La función principal del agente es ayudar a mantener sano el proceso operativo de tickets: priorización, seguimiento, estados, recordatorios, coherencia de workflows y calidad de los Issues.
 
-## Configuración del Agente
+## Prioridad para agentes y Codex Review
 
-### Trigger (Activadores)
-```
-Evento: schedule (programado diariamente)
-Alternativa: workflow_dispatch (manual)
-```
+Cuando un agente revise este repositorio, debe priorizar este orden:
 
-### Parámetros de Inactividad
-```
-INACTIVITY_DAYS: 7          # Días sin actividad para considerar "inactivo"
-INCLUDE_LABELS: []          # Etiquetas a revisar (vacío = todas)
-EXCLUDE_LABELS: ["blocked"] # Etiquetas a excluir
-```
+1. Issues abiertos y su estado operativo.
+2. Workflows de GitHub Actions que automatizan el ciclo de vida de tickets.
+3. Templates, labels y reglas que afectan cómo se cargan o actualizan tickets.
+4. README y documentación operativa.
+5. Código o scripts auxiliares, solo en la medida en que afecten el flujo de tickets.
 
-### Lógica de Análisis
+La revisión de código convencional es secundaria. Si hay cambios de código, scripts o YAML, analizarlos por su impacto en el sistema de tickets antes que por estilo o refactors generales.
 
-1. **Detectar Issues Inactivos**
-   - Comparar `updated_at` con fecha actual
-   - Si diferencia > `INACTIVITY_DAYS`: marcar como inactivo
-   - Ignorar Issues con etiquetas excluidas
+## Qué debe mirar primero
 
-2. **Validaciones**
-   - Ignorar Issues cerrados
-   - Ignorar Issues con label "wontfix" o "no-review"
-   - Ignorar Issues con comentario reciente de Codex Review
+Antes de comentar o sugerir cambios, revisar:
 
-3. **Realizar Revisión**
-   - Analizar contenido del Issue
-   - Evaluar descripción y contexto
-   - Determinar si requiere acción
+- `.github/workflows/inactivity-reminders.yml`
+- `.github/workflows/assign-pp-ticket-id.yml`
+- `.github/ISSUE_TEMPLATE/registro-ticket-rapido.yml`
+- `README.md`
+- Issues abiertos del repositorio, especialmente:
+  - Prioridad: `prioridad:urgente`, `prioridad:alta`, `prioridad:media`, `prioridad:baja`
+  - Estado: `estado:abierto`, `estado:en-curso`, `estado:esperando-respuesta`, `estado:cerrado`
+  - Sistema afectado: `sistema:digifort`, `sistema:hikvision`, `sistema:ccure`, `sistema:windows`, `sistema:redes`
+  - Escalamientos: labels `escalamiento:*`
 
-4. **Enviar Comentario**
-   - Agregar comentario automático con formato estándar
-   - Incluir fecha de revisión
-   - Sugerir acciones si aplica
+## Criterio de revisión operativa
 
----
+Al revisar, buscar principalmente:
 
-## Formato de Comentario
+- Tickets urgentes o altos sin actualización reciente.
+- Tickets abiertos sin prioridad clara.
+- Tickets con estado inconsistente con sus comentarios o labels.
+- Tickets en `estado:esperando-respuesta` que ya recibieron respuesta humana.
+- Tickets cerrados que todavía parecen tener acciones pendientes.
+- Issues duplicados o relacionados que conviene vincular.
+- Falta de datos operativos mínimos: sistema afectado, solicitante, descripción, estado, prioridad o link técnico.
+- Automatizaciones que podrían comentar demasiado, no comentar cuando corresponde, o generar ruido.
+- Workflows que podrían fallar por permisos, cron, labels mal escritos, cambios de naming o eventos incorrectos.
 
-```
-🤖 **Revisado por Codex Review**
+## Cómo comentar
 
-**Estado:** Inactividad detectada
-**Último cambio:** {fecha_ultima_actualizacion}
-**Días sin actividad:** {dias_inactivo}
+Los comentarios deben ser útiles para operar tickets, no genéricos.
 
-### Análisis
-- ✅ Issue bien definido
-- ⚠️ Descripción clara pero requiere detalles adicionales
-- 📝 Se recomienda: {recomendacion}
+Preferir comentarios breves y accionables:
 
-**Acciones sugeridas:**
-1. Actualizar estado del Issue
-2. Asignar a un responsable si es urgente
-3. Cerrar si ya no es relevante
+- Resumen del hallazgo.
+- Ticket o workflow afectado.
+- Riesgo operativo.
+- Acción concreta sugerida.
 
----
-*Revisión automática realizada el {fecha_revision} por Codex Review*
-```
+Evitar comentarios de estilo de código si no afectan el flujo operativo.
 
----
+Ejemplo de buen comentario:
 
-## Variables Internas
+> Este workflow depende de labels `prioridad:*`. Si un ticket entra sin prioridad, no recibirá recordatorios. Conviene agregar una validación o comentario automático para Issues sin prioridad.
 
-### Disponibles en el Contexto
-```
-ISSUE_NUMBER        = github.event.issue.number
-ISSUE_TITLE         = github.event.issue.title
-ISSUE_BODY          = github.event.issue.body
-ISSUE_LABELS        = github.event.issue.labels[].name
-ISSUE_UPDATED_AT    = github.event.issue.updated_at
-ISSUE_CREATED_AT    = github.event.issue.created_at
-ISSUE_STATE         = github.event.issue.state
-REPO_NAME           = github.repository
-WORKFLOW_DATE       = github.event.schedule (si aplica)
-```
+Ejemplo de comentario poco útil:
 
-### Cálculos Derivados
-```
-DAYS_INACTIVE       = (TODAY - ISSUE_UPDATED_AT).days
-LAST_COMMENT_DATE   = max(comment.created_at)
-REQUIRES_REVIEW     = DAYS_INACTIVE > INACTIVITY_DAYS
-```
+> Se podría renombrar esta variable para mejorar legibilidad.
 
----
+## Reglas para workflows
 
-## Configuración Técnica
+Al revisar workflows:
 
-### Archivo de Workflow
-Ubicación: `.github/workflows/codex-review-inactivity.yml`
+- Confirmar que el cron esté activo y documentado.
+- Confirmar que los permisos mínimos necesarios estén declarados.
+- Verificar que los comentarios automáticos no se repitan innecesariamente.
+- Verificar que haya pausa o protección contra spam.
+- Verificar que se excluyan tickets cerrados o en espera cuando corresponda.
+- Verificar que los labels usados por el workflow coincidan exactamente con los labels documentados.
 
-### Evento Recomendado
-```yaml
-on:
-  schedule:
-    - cron: '0 9 * * MON'  # Lunes a las 9 AM UTC
-  workflow_dispatch:       # Permitir ejecución manual
-```
+## Reglas para Issues
 
-### Permisos Requeridos
-```yaml
-permissions:
-  issues: write           # Para agregar comentarios
-  contents: read          # Para leer contenido
-  repository-projects: read
-```
+Al revisar Issues:
 
----
+- Tratar cada Issue como un ticket operativo real.
+- Priorizar continuidad del seguimiento por encima de formato perfecto.
+- Sugerir comentarios, cierres o cambios de estado solo si hay evidencia en el Issue.
+- No asumir resolución si no está documentada.
+- Si falta información crítica, pedir el dato mínimo necesario.
 
-## Opciones de Configuración
+## Tono esperado
 
-### Nivel 1: Básico
-- Solo detectar inactividad
-- Enviar comentario simple
+Usar español claro, directo y operativo.
 
-### Nivel 2: Estándar (Recomendado)
-- Detectar inactividad
-- Analizar contenido
-- Enviar comentario con recomendaciones
+No sonar como auditoría burocrática. El objetivo es ayudar a que Gustavo y el equipo sepan qué ticket requiere atención y qué automatización puede fallar.
 
-### Nivel 3: Avanzado
-- Detectar inactividad
-- Analizar contenido
-- Asignar labels automáticamente
-- Notificar a responsables
-- Enviar comentario detallado
+## Resumen para Codex Review
 
----
-
-## Exclusiones Automáticas
-
-Los siguientes Issues **NO serán revisados:**
-
-- ✗ Issues cerrados
-- ✗ Issues con label `blocked`
-- ✗ Issues con label `wontfix`
-- ✗ Issues con label `no-review`
-- ✗ Issues con comentario de Codex Review en últimos 3 días
-- ✗ Issues creados hace menos de 1 día
-
----
-
-## Monitoreo
-
-### Métricas Generadas
-- Total de Issues analizados
-- Issues inactivos detectados
-- Comentarios enviados
-- Tasa de seguimiento
-
-### Logs
-Todos los análisis se registran con:
-- Timestamp
-- Issue ID
-- Resultado del análisis
-- Acciones ejecutadas
-
----
-
-## Contribución
-
-Para modificar este agente:
-
-1. Editar parámetros en `.github/workflows/codex-review-inactivity.yml`
-2. Actualizar variables en la sección "Variables Internas"
-3. Modificar template de comentario en la sección "Formato de Comentario"
-4. Actualizar esta documentación
-5. Crear PR para revisión
-
----
-
-**Última actualización:** 2026-05-07
-**Versión del Agente:** 1.0
-**Estado:** Activo
+Si Codex Review lee este archivo: este repositorio debe revisarse como un tablero operativo de tickets. Antes de comentar sobre calidad de código, revisar workflows e Issues y comentar sobre riesgos, prioridades, estados, recordatorios y continuidad operativa.
