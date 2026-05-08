@@ -2,7 +2,7 @@ name: Inactivity Reminders
 
 on:
   schedule:
-    - cron: '0 */12 * * *'
+    - cron: '0 */8 * * *'
   workflow_dispatch:
 
 permissions:
@@ -44,7 +44,7 @@ jobs:
               checked++;
 
               const labels = (issue.labels || []).map(l => typeof l === 'string' ? l : l.name).filter(Boolean);
-              if (labels.includes('estado:cerrado') || labels.includes('estado:esperando-respuesta')) continue;
+              if (labels.includes('estado:cerrado')) continue;
 
               const priorityLabel = Object.keys(cfg).find(k => labels.includes(k));
               if (!priorityLabel) continue;
@@ -133,7 +133,7 @@ jobs:
               analyzed++;
 
               const labels = (issue.labels || []).map(l => typeof l === 'string' ? l : l.name).filter(Boolean);
-              if (labels.includes('estado:cerrado') || labels.includes('estado:esperando-respuesta')) continue;
+              if (labels.includes('estado:cerrado')) continue;
 
               const priorityLabel = Object.keys(cfg).find(k => labels.includes(k));
               if (!priorityLabel) continue;
