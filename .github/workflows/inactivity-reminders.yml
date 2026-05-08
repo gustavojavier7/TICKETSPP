@@ -148,9 +148,6 @@ jobs:
               if (!priorityLabel) continue;
 
               const { inactivityMs } = cfg[priorityLabel];
-              const lastUpdatedMs = new Date(issue.updated_at).getTime();
-              const inactiveFor = now - lastUpdatedMs;
-              if (inactiveFor < inactivityMs) continue;
 
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner: context.repo.owner,
@@ -158,6 +155,18 @@ jobs:
                 issue_number: issue.number,
                 per_page: 100,
               });
+
+              const humanComments = comments
+                .filter(c => c.user?.type !== 'Bot')
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+              const lastHumanComment = humanComments[0];
+              const lastHumanActivityMs = lastHumanComment
+                ? new Date(lastHumanComment.created_at).getTime()
+                : new Date(issue.created_at).getTime();
+
+              const inactiveFor = now - lastHumanActivityMs;
+              if (inactiveFor < inactivityMs) continue;
 
               // Evitar duplicar comentarios de Codex Review en 3 días
               const codexComments = comments
@@ -173,7 +182,7 @@ jobs:
 
               // Calcular días de inactividad
               const daysInactive = Math.floor(inactiveFor / DAY_MS);
-              const formattedDate = new Date(issue.updated_at).toLocaleDateString('es-ES');
+              const formattedDate = new Date(lastHumanActivityMs).toLocaleDateString('es-ES');
 
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -184,7 +193,7 @@ jobs:
                   '🤖 **Revisado por Codex Review**',
                   '',
                   `**Estado:** Inactividad detectada`,
-                  `**Último cambio:** ${formattedDate}`,
+                  `**Última actividad humana:** ${formattedDate}`,
                   `**Días sin actividad:** ${daysInactive}`,
                   `**Prioridad:** ${priorityLabel}`,
                   '',
