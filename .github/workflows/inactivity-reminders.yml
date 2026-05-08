@@ -50,9 +50,6 @@ jobs:
               if (!priorityLabel) continue;
 
               const { inactivityMs, p } = cfg[priorityLabel];
-              const lastUpdatedMs = new Date(issue.updated_at).getTime();
-              const inactiveFor = now - lastUpdatedMs;
-              if (inactiveFor < inactivityMs) continue;
 
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner: context.repo.owner,
@@ -60,6 +57,18 @@ jobs:
                 issue_number: issue.number,
                 per_page: 100,
               });
+
+              const humanComments = comments
+                .filter(c => c.user?.type !== 'Bot')
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+              const lastHumanComment = humanComments[0];
+              const lastHumanActivityMs = lastHumanComment
+                ? new Date(lastHumanComment.created_at).getTime()
+                : new Date(issue.created_at).getTime();
+
+              const inactiveFor = now - lastHumanActivityMs;
+              if (inactiveFor < inactivityMs) continue;
 
               const reminderComments = comments
                 .filter(c => (c.body || '').includes(REMINDER_MARKER))
