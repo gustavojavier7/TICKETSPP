@@ -12,7 +12,7 @@ jobs:
   remind:
     runs-on: ubuntu-latest
     steps:
-      - name: Weighted inactivity reminders
+      - name: Probabilistic inactivity triage
         uses: actions/github-script@v7
         with:
           script: |
@@ -25,10 +25,10 @@ jobs:
             const AUTO_MARKERS = [REMINDER_MARKER, CODEX_MARKER];
 
             const cfg = {
-              'prioridad:urgente': { inactivityMs: 24 * HOUR_MS, p: 3/4 },
-              'prioridad:alta':    { inactivityMs: 48 * HOUR_MS, p: 2/3 },
-              'prioridad:media':   { inactivityMs: 7 * DAY_MS,   p: 1/2 },
-              'prioridad:baja':    { inactivityMs: 28 * DAY_MS,  p: 1/6 },
+              'prioridad:urgente': { inactivityMs: 24 * HOUR_MS, p: 3/4, mode: 'codex' },
+              'prioridad:alta':    { inactivityMs: 48 * HOUR_MS, p: 2/3, mode: 'codex' },
+              'prioridad:media':   { inactivityMs: 7 * DAY_MS,   p: 1/2, mode: 'normal' },
+              'prioridad:baja':    { inactivityMs: 28 * DAY_MS,  p: 1/6, mode: 'normal' },
             };
 
             const issues = await github.paginate(github.rest.issues.listForRepo, {
@@ -39,7 +39,9 @@ jobs:
             });
 
             let checked = 0;
-            let reminded = 0;
+            let notified = 0;
+            let normalNotified = 0;
+            let codexReviewed = 0;
 
             for (const issue of issues) {
               if (issue.pull_request) continue;
@@ -51,7 +53,7 @@ jobs:
               const priorityLabel = Object.keys(cfg).find(k => labels.includes(k));
               if (!priorityLabel) continue;
 
-              const { inactivityMs, p } = cfg[priorityLabel];
+              const { inactivityMs, p, mode } = cfg[priorityLabel];
 
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner: context.repo.owner,
@@ -88,150 +90,61 @@ jobs:
                 if (now < pauseUntil) continue;
               }
 
+              // Pausa global: ningún canal automático repite sobre el mismo issue por 7 días.
+              if (lastAutomation) {
+                const pauseUntil = new Date(lastAutomation.created_at).getTime() + PAUSE_MS;
+                if (now < pauseUntil) continue;
+              }
+
+              // Selección probabilística única. Si no sale elegido, no comenta nadie.
               if (Math.random() >= p) continue;
 
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                body: [
-                  `<!-- ${REMINDER_MARKER} -->`,
-                  '⚠️ Recordatorio automático por inactividad.',
-                  `Prioridad detectada: **${priorityLabel}**.`,
-                  'Si el incidente sigue vigente, por favor actualiza el estado o deja un comentario.',
-                  '⏸️ Cualquier comentario pausará nuevos recordatorios por **7 días**.'
-                ].join('\n\n')
-              });
-
-              reminded++;
-            }
-
-            core.info(`Checked: ${checked}; Reminded: ${reminded}`);
-
-  codex-review:
-    runs-on: ubuntu-latest
-    needs: remind
-    steps:
-      - name: Codex Review - Análisis de Inactividad
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const DAY_MS = 24 * 60 * 60 * 1000;
-            const HOUR_MS = 60 * 60 * 1000;
-            const now = Date.now();
-            const PAUSE_MS = 7 * DAY_MS;
-            const REMINDER_MARKER = 'recordatorio-inactividad-v1';
-            const CODEX_MARKER = 'codex-review-inactivity-v1';
-            const AUTO_MARKERS = [REMINDER_MARKER, CODEX_MARKER];
-
-            const cfg = {
-              'prioridad:urgente': { inactivityMs: 24 * HOUR_MS },
-              'prioridad:alta':    { inactivityMs: 48 * HOUR_MS },
-              'prioridad:media':   { inactivityMs: 7 * DAY_MS },
-              'prioridad:baja':    { inactivityMs: 28 * DAY_MS },
-            };
-
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              per_page: 100,
-            });
-
-            let analyzed = 0;
-            let reviewed = 0;
-
-            for (const issue of issues) {
-              if (issue.pull_request) continue;
-              analyzed++;
-
-              const labels = (issue.labels || []).map(l => typeof l === 'string' ? l : l.name).filter(Boolean);
-              if (labels.includes('estado:cerrado')) continue;
-
-              const priorityLabel = Object.keys(cfg).find(k => labels.includes(k));
-              if (!priorityLabel) continue;
-
-              const { inactivityMs } = cfg[priorityLabel];
-
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                per_page: 100,
-              });
-
-              const humanComments = comments
-                .filter(c => c.user?.type !== 'Bot')
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-              const lastHumanComment = humanComments[0];
-              const lastHumanActivityMs = lastHumanComment
-                ? new Date(lastHumanComment.created_at).getTime()
-                : new Date(issue.created_at).getTime();
-
-              const inactiveFor = now - lastHumanActivityMs;
-              if (inactiveFor < inactivityMs) continue;
-
-              const automationComments = comments
-                .filter(c => AUTO_MARKERS.some(marker => (c.body || '').includes(marker)))
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-              const lastAutomation = automationComments[0];
-              const humansAfterAutomation = comments
-                .filter(c => c.user?.type !== 'Bot')
-                .filter(c => !lastAutomation || new Date(c.created_at).getTime() > new Date(lastAutomation.created_at).getTime())
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-              const lastHumanAfterAutomation = humansAfterAutomation[0];
-              if (lastHumanAfterAutomation) {
-                const pauseUntil = new Date(lastHumanAfterAutomation.created_at).getTime() + PAUSE_MS;
-                if (now < pauseUntil) continue;
-              }
-
-              // Evitar duplicar comentarios de Codex Review con la misma pausa global
-              const codexComments = comments
-                .filter(c => (c.body || '').includes(CODEX_MARKER))
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-              const lastCodexReview = codexComments[0];
-              if (lastCodexReview) {
-                const pauseUntil = new Date(lastCodexReview.created_at).getTime() + PAUSE_MS;
-                if (now < pauseUntil) continue;
-              }
-
-              // Calcular días de inactividad
               const daysInactive = Math.floor(inactiveFor / DAY_MS);
               const formattedDate = new Date(lastHumanActivityMs).toLocaleDateString('es-ES');
 
+              const body = mode === 'codex'
+                ? [
+                    `<!-- ${CODEX_MARKER} -->`,
+                    '🤖 **Revisado por Codex Review**',
+                    '',
+                    `**Estado:** Inactividad detectada`,
+                    `**Última actividad humana:** ${formattedDate}`,
+                    `**Días sin actividad:** ${daysInactive}`,
+                    `**Prioridad:** ${priorityLabel}`,
+                    '',
+                    '### Análisis',
+                    `- ✅ Issue bien definido: "${issue.title}"`,
+                    `- 📊 Descripción disponible: ${issue.body ? '✓' : '✗'}`,
+                    `- 🏷️ Etiquetas asignadas: ${labels.length > 0 ? labels.join(', ') : 'Ninguna'}`,
+                    '',
+                    '### Acciones sugeridas',
+                    '1. 📝 Actualizar el estado del Issue si continúa siendo relevante',
+                    '2. 👤 Asignar a un responsable si requiere acción inmediata',
+                    '3. ✅ Cerrar el Issue si ya no aplica',
+                    '4. 💬 Dejar un comentario para reactivar el ticket',
+                    '',
+                    '⏸️ Cualquier comentario pausará nuevas notificaciones automáticas por **7 días**.',
+                    '',
+                    `*Revisión automática realizada el ${new Date().toLocaleDateString('es-ES')} por Codex Review Agent*`
+                  ].join('\n')
+                : [
+                    `<!-- ${REMINDER_MARKER} -->`,
+                    '⚠️ Recordatorio automático por inactividad.',
+                    `Prioridad detectada: **${priorityLabel}**.`,
+                    'Si el incidente sigue vigente, por favor actualiza el estado o deja un comentario.',
+                    '⏸️ Cualquier comentario pausará nuevas notificaciones automáticas por **7 días**.'
+                  ].join('\n\n');
+
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issue.number,
-                body: [
-                  `<!-- ${CODEX_MARKER} -->`,
-                  '🤖 **Revisado por Codex Review**',
-                  '',
-                  `**Estado:** Inactividad detectada`,
-                  `**Última actividad humana:** ${formattedDate}`,
-                  `**Días sin actividad:** ${daysInactive}`,
-                  `**Prioridad:** ${priorityLabel}`,
-                  '',
-                  '### Análisis',
-                  `- ✅ Issue bien definido: "${issue.title}"`,
-                  `- 📊 Descripción disponible: ${issue.body ? '✓' : '✗'}`,
-                  `- 🏷️ Etiquetas asignadas: ${labels.length > 0 ? labels.join(', ') : 'Ninguna'}`,
-                  '',
-                  '### Acciones sugeridas',
-                  '1. 📝 Actualizar el estado del Issue si continúa siendo relevante',
-                  '2. 👤 Asignar a un responsable si requiere acción inmediata',
-                  '3. ✅ Cerrar el Issue si ya no aplica',
-                  '4. 💬 Dejar un comentario para reactivar el ticket',
-                  '',
-                  `*Revisión automática realizada el ${new Date().toLocaleDateString('es-ES')} por Codex Review Agent*`
-                ].join('\n')
+                body
               });
 
-              reviewed++;
+              notified++;
+              if (mode === 'codex') codexReviewed++;
+              else normalNotified++;
             }
 
-            core.info(`Codex Review - Analyzed: ${analyzed}; Reviewed: ${reviewed}`);
+            core.info(`Checked: ${checked}; Notified: ${notified}; Normal: ${normalNotified}; Codex: ${codexReviewed}`);
