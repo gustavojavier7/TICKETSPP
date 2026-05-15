@@ -123,7 +123,7 @@ jobs:
                     '3. ✅ Cerrar el Issue si ya no aplica',
                     '4. 💬 Dejar un comentario para reactivar el ticket',
                     '',
-                    '⏸️ Cualquier comentario pausará nuevas notificaciones automáticas por **7 días**.',
+                    '⏸️ Cualquier comentario humano pausará nuevas notificaciones automáticas por **7 días**.',
                     '',
                     `*Revisión automática realizada el ${new Date().toLocaleDateString('es-ES')} por Codex Review Agent*`
                   ].join('\n')
@@ -132,7 +132,7 @@ jobs:
                     '⚠️ Recordatorio automático por inactividad.',
                     `Prioridad detectada: **${priorityLabel}**.`,
                     'Si el incidente sigue vigente, por favor actualiza el estado o deja un comentario.',
-                    '⏸️ Cualquier comentario pausará nuevas notificaciones automáticas por **7 días**.'
+                    '⏸️ Cualquier comentario humano pausará nuevas notificaciones automáticas por **7 días**.'
                   ].join('\n\n');
 
               await github.rest.issues.createComment({
