@@ -19,8 +19,10 @@ jobs:
             const DAY_MS = 24 * 60 * 60 * 1000;
             const HOUR_MS = 60 * 60 * 1000;
             const now = Date.now();
-            const PAUSE_MS = 14 * DAY_MS;
+            const PAUSE_MS = 7 * DAY_MS;
             const REMINDER_MARKER = 'recordatorio-inactividad-v1';
+            const CODEX_MARKER = 'codex-review-inactivity-v1';
+            const AUTO_MARKERS = [REMINDER_MARKER, CODEX_MARKER];
 
             const cfg = {
               'prioridad:urgente': { inactivityMs: 24 * HOUR_MS, p: 3/4 },
@@ -70,19 +72,19 @@ jobs:
               const inactiveFor = now - lastHumanActivityMs;
               if (inactiveFor < inactivityMs) continue;
 
-              const reminderComments = comments
-                .filter(c => (c.body || '').includes(REMINDER_MARKER))
+              const automationComments = comments
+                .filter(c => AUTO_MARKERS.some(marker => (c.body || '').includes(marker)))
                 .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-              const lastReminder = reminderComments[0];
-              const humansAfterReminder = comments
+              const lastAutomation = automationComments[0];
+              const humansAfterAutomation = comments
                 .filter(c => c.user?.type !== 'Bot')
-                .filter(c => !lastReminder || new Date(c.created_at).getTime() > new Date(lastReminder.created_at).getTime())
+                .filter(c => !lastAutomation || new Date(c.created_at).getTime() > new Date(lastAutomation.created_at).getTime())
                 .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-              const lastHumanAfterReminder = humansAfterReminder[0];
-              if (lastHumanAfterReminder) {
-                const pauseUntil = new Date(lastHumanAfterReminder.created_at).getTime() + PAUSE_MS;
+              const lastHumanAfterAutomation = humansAfterAutomation[0];
+              if (lastHumanAfterAutomation) {
+                const pauseUntil = new Date(lastHumanAfterAutomation.created_at).getTime() + PAUSE_MS;
                 if (now < pauseUntil) continue;
               }
 
@@ -97,7 +99,7 @@ jobs:
                   '⚠️ Recordatorio automático por inactividad.',
                   `Prioridad detectada: **${priorityLabel}**.`,
                   'Si el incidente sigue vigente, por favor actualiza el estado o deja un comentario.',
-                  '⏸️ Cualquier comentario pausará nuevos recordatorios por **14 días**.'
+                  '⏸️ Cualquier comentario pausará nuevos recordatorios por **7 días**.'
                 ].join('\n\n')
               });
 
@@ -117,8 +119,10 @@ jobs:
             const DAY_MS = 24 * 60 * 60 * 1000;
             const HOUR_MS = 60 * 60 * 1000;
             const now = Date.now();
-            const PAUSE_MS = 14 * DAY_MS;
+            const PAUSE_MS = 7 * DAY_MS;
+            const REMINDER_MARKER = 'recordatorio-inactividad-v1';
             const CODEX_MARKER = 'codex-review-inactivity-v1';
+            const AUTO_MARKERS = [REMINDER_MARKER, CODEX_MARKER];
 
             const cfg = {
               'prioridad:urgente': { inactivityMs: 24 * HOUR_MS },
@@ -168,15 +172,30 @@ jobs:
               const inactiveFor = now - lastHumanActivityMs;
               if (inactiveFor < inactivityMs) continue;
 
-              // Evitar duplicar comentarios de Codex Review en 3 días
+              const automationComments = comments
+                .filter(c => AUTO_MARKERS.some(marker => (c.body || '').includes(marker)))
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+              const lastAutomation = automationComments[0];
+              const humansAfterAutomation = comments
+                .filter(c => c.user?.type !== 'Bot')
+                .filter(c => !lastAutomation || new Date(c.created_at).getTime() > new Date(lastAutomation.created_at).getTime())
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+              const lastHumanAfterAutomation = humansAfterAutomation[0];
+              if (lastHumanAfterAutomation) {
+                const pauseUntil = new Date(lastHumanAfterAutomation.created_at).getTime() + PAUSE_MS;
+                if (now < pauseUntil) continue;
+              }
+
+              // Evitar duplicar comentarios de Codex Review con la misma pausa global
               const codexComments = comments
                 .filter(c => (c.body || '').includes(CODEX_MARKER))
                 .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
               const lastCodexReview = codexComments[0];
               if (lastCodexReview) {
-                const reviewPauseMs = 3 * DAY_MS;
-                const pauseUntil = new Date(lastCodexReview.created_at).getTime() + reviewPauseMs;
+                const pauseUntil = new Date(lastCodexReview.created_at).getTime() + PAUSE_MS;
                 if (now < pauseUntil) continue;
               }
 
