@@ -2,7 +2,17 @@ name: Inactivity Reminders
 
 on:
   schedule:
-    - cron: '17 */8 * * *'
+    # Ejecución inicial de prueba:
+    # 03/08/2026 17:10 Argentina = 20:10 UTC.
+    # Esta regla volvería a coincidir cada 3 de agosto,
+    # por lo que debe eliminarse después de la prueba inicial.
+    - cron: '10 20 3 8 *'
+
+    # Curso normal: cada 8 horas, al minuto 15.
+    # Argentina: aproximadamente 05:15, 13:15 y 21:15.
+    - cron: '15 */8 * * *'
+
+  # Permite ejecutar el recordatorio manualmente desde Actions.
   workflow_dispatch:
 
 permissions:
@@ -10,141 +20,657 @@ permissions:
 
 jobs:
   remind:
+    name: Probabilistic inactivity triage
     runs-on: ubuntu-latest
+
     steps:
-      - name: Probabilistic inactivity triage
+      - name: Check inactivity and send reminders
         uses: actions/github-script@v8
         with:
           script: |
             const DAY_MS = 24 * 60 * 60 * 1000;
             const HOUR_MS = 60 * 60 * 1000;
             const now = Date.now();
+
             const PAUSE_MS = 7 * DAY_MS;
+
             const REMINDER_MARKER = 'recordatorio-inactividad-v1';
             const CODEX_MARKER = 'codex-review-inactivity-v1';
-            const AUTO_MARKERS = [REMINDER_MARKER, CODEX_MARKER];
 
+            const AUTO_MARKERS = [
+              REMINDER_MARKER,
+              CODEX_MARKER
+            ];
+
+            /*
+             * Configuración por prioridad:
+             *
+             * inactivityMs:
+             * tiempo mínimo de inactividad para ser elegible.
+             *
+             * p:
+             * probabilidad de enviar el aviso en cada ejecución elegible.
+             *
+             * mode:
+             * tipo de comentario que se publicará.
+             */
             const cfg = {
-              'prioridad:urgente': { inactivityMs: 24 * HOUR_MS, p: 3/4, mode: 'codex' },
-              'prioridad:alta':    { inactivityMs: 48 * HOUR_MS, p: 2/3, mode: 'codex' },
-              'prioridad:media':   { inactivityMs: 7 * DAY_MS,   p: 1/2, mode: 'normal' },
-              'prioridad:baja':    { inactivityMs: 28 * DAY_MS,  p: 1/6, mode: 'normal' },
+              'prioridad:urgente': {
+                inactivityMs: 24 * HOUR_MS,
+                p: 3 / 4,
+                mode: 'codex'
+              },
+
+              'prioridad:alta': {
+                inactivityMs: 48 * HOUR_MS,
+                p: 2 / 3,
+                mode: 'codex'
+              },
+
+              'prioridad:media': {
+                inactivityMs: 7 * DAY_MS,
+                p: 1 / 2,
+                mode: 'normal'
+              },
+
+              'prioridad:baja': {
+                inactivityMs: 28 * DAY_MS,
+                p: 1 / 6,
+                mode: 'normal'
+              }
             };
 
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              per_page: 100,
-            });
+            /*
+             * Auditoría completa de decisiones.
+             * Cada issue genera una entrada, haya aviso o no.
+             */
+            const auditLog = [];
 
-            let checked = 0;
-            let notified = 0;
-            let normalNotified = 0;
-            let codexReviewed = 0;
+            const counters = {
+              checked: 0,
+              notified: 0,
+              normalNotified: 0,
+              codexReviewed: 0,
+              skippedPullRequests: 0,
+              skippedClosedLabel: 0,
+              missingPriority: 0,
+              insufficientInactivity: 0,
+              pausedByHuman: 0,
+              pausedByAutomation: 0,
+              randomRejected: 0,
+              errors: 0
+            };
 
-            for (const issue of issues) {
-              if (issue.pull_request) continue;
-              checked++;
-
-              const labels = (issue.labels || []).map(l => typeof l === 'string' ? l : l.name).filter(Boolean);
-              if (labels.includes('estado:cerrado')) continue;
-
-              const priorityLabel = Object.keys(cfg).find(k => labels.includes(k));
-              if (!priorityLabel) continue;
-
-              const { inactivityMs, p, mode } = cfg[priorityLabel];
-
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                per_page: 100,
-              });
-
-              const humanComments = comments
-                .filter(c => c.user?.type !== 'Bot')
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-              const lastHumanComment = humanComments[0];
-              const lastHumanActivityMs = lastHumanComment
-                ? new Date(lastHumanComment.created_at).getTime()
-                : new Date(issue.created_at).getTime();
-
-              const inactiveFor = now - lastHumanActivityMs;
-              if (inactiveFor < inactivityMs) continue;
-
-              const automationComments = comments
-                .filter(c => AUTO_MARKERS.some(marker => (c.body || '').includes(marker)))
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-              const lastAutomation = automationComments[0];
-              const humansAfterAutomation = comments
-                .filter(c => c.user?.type !== 'Bot')
-                .filter(c => !lastAutomation || new Date(c.created_at).getTime() > new Date(lastAutomation.created_at).getTime())
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-              const lastHumanAfterAutomation = humansAfterAutomation[0];
-              if (lastHumanAfterAutomation) {
-                const pauseUntil = new Date(lastHumanAfterAutomation.created_at).getTime() + PAUSE_MS;
-                if (now < pauseUntil) continue;
-              }
-
-              // Pausa global: ningún canal automático repite sobre el mismo issue por 7 días.
-              if (lastAutomation) {
-                const pauseUntil = new Date(lastAutomation.created_at).getTime() + PAUSE_MS;
-                if (now < pauseUntil) continue;
-              }
-
-              // Selección probabilística única. Si no sale elegido, no comenta nadie.
-              if (Math.random() >= p) continue;
-
-              const daysInactive = Math.floor(inactiveFor / DAY_MS);
-              const formattedDate = new Date(lastHumanActivityMs).toLocaleDateString('es-ES');
-
-              const body = mode === 'codex'
-                ? [
-                    `<!-- ${CODEX_MARKER} -->`,
-                    '🤖 **Revisado por Codex Review**',
-                    '',
-                    `**Estado:** Inactividad detectada`,
-                    `**Última actividad humana:** ${formattedDate}`,
-                    `**Días sin actividad:** ${daysInactive}`,
-                    `**Prioridad:** ${priorityLabel}`,
-                    '',
-                    '### Análisis',
-                    `- ✅ Issue bien definido: "${issue.title}"`,
-                    `- 📊 Descripción disponible: ${issue.body ? '✓' : '✗'}`,
-                    `- 🏷️ Etiquetas asignadas: ${labels.length > 0 ? labels.join(', ') : 'Ninguna'}`,
-                    '',
-                    '### Acciones sugeridas',
-                    '1. 📝 Actualizar el estado del Issue si continúa siendo relevante',
-                    '2. 👤 Asignar a un responsable si requiere acción inmediata',
-                    '3. ✅ Cerrar el Issue si ya no aplica',
-                    '4. 💬 Dejar un comentario para reactivar el ticket',
-                    '',
-                    '⏸️ Cualquier comentario humano pausará nuevas notificaciones automáticas por **7 días**.',
-                    '',
-                    `*Revisión automática realizada el ${new Date().toLocaleDateString('es-ES')} por Codex Review Agent*`
-                  ].join('\n')
-                : [
-                    `<!-- ${REMINDER_MARKER} -->`,
-                    '⚠️ Recordatorio automático por inactividad.',
-                    `Prioridad detectada: **${priorityLabel}**.`,
-                    'Si el incidente sigue vigente, por favor actualiza el estado o deja un comentario.',
-                    '⏸️ Cualquier comentario humano pausará nuevas notificaciones automáticas por **7 días**.'
-                  ].join('\n\n');
-
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                body
-              });
-
-              notified++;
-              if (mode === 'codex') codexReviewed++;
-              else normalNotified++;
+            function days(ms) {
+              return Number((ms / DAY_MS).toFixed(2));
             }
 
-            core.info(`Checked: ${checked}; Notified: ${notified}; Normal: ${normalNotified}; Codex: ${codexReviewed}`);
+            function probability(value) {
+              return Number(value.toFixed(4));
+            }
+
+            function isoDate(ms) {
+              if (!Number.isFinite(ms)) {
+                return null;
+              }
+
+              return new Date(ms).toISOString();
+            }
+
+            function formatArgentinaDate(ms) {
+              return new Intl.DateTimeFormat('es-AR', {
+                timeZone: 'America/Argentina/Buenos_Aires',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit'
+              }).format(new Date(ms));
+            }
+
+            function writeDecision(entry) {
+              auditLog.push(entry);
+
+              const parts = [
+                `Issue #${entry.issue}`,
+                `decisión=${entry.decision}`,
+                `causa=${entry.reason}`
+              ];
+
+              if (entry.priority) {
+                parts.push(`prioridad=${entry.priority}`);
+              }
+
+              if (entry.inactiveDays !== undefined) {
+                parts.push(`inactividad=${entry.inactiveDays}d`);
+              }
+
+              if (entry.requiredDays !== undefined) {
+                parts.push(`mínimo=${entry.requiredDays}d`);
+              }
+
+              if (entry.configuredProbability !== undefined) {
+                parts.push(
+                  `probabilidad=${entry.configuredProbability}`
+                );
+              }
+
+              if (entry.randomValue !== undefined) {
+                parts.push(`sorteo=${entry.randomValue}`);
+              }
+
+              if (entry.mode) {
+                parts.push(`modo=${entry.mode}`);
+              }
+
+              if (entry.resumeAt) {
+                parts.push(`reanuda=${entry.resumeAt}`);
+              }
+
+              core.info(parts.join(' | '));
+            }
+
+            core.info(
+              `Inicio del análisis: ${new Date(now).toISOString()}`
+            );
+
+            core.info(
+              `Evento: ${context.eventName}; ` +
+              `cron: ${context.payload.schedule || 'manual/no disponible'}`
+            );
+
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                per_page: 100
+              }
+            );
+
+            core.info(
+              `Elementos abiertos recuperados: ${issues.length}`
+            );
+
+            for (const issue of issues) {
+              /*
+               * La API de issues también devuelve pull requests.
+               */
+              if (issue.pull_request) {
+                counters.skippedPullRequests++;
+
+                writeDecision({
+                  issue: issue.number,
+                  title: issue.title,
+                  decision: 'OMITIDO',
+                  reason: 'es_pull_request'
+                });
+
+                continue;
+              }
+
+              counters.checked++;
+
+              const labels = (issue.labels || [])
+                .map(label =>
+                  typeof label === 'string'
+                    ? label
+                    : label.name
+                )
+                .filter(Boolean);
+
+              /*
+               * Aunque el issue esté abierto en GitHub, la etiqueta
+               * administrativa estado:cerrado lo excluye.
+               */
+              if (labels.includes('estado:cerrado')) {
+                counters.skippedClosedLabel++;
+
+                writeDecision({
+                  issue: issue.number,
+                  title: issue.title,
+                  decision: 'NO_ELEGIBLE',
+                  reason: 'etiqueta_estado_cerrado'
+                });
+
+                continue;
+              }
+
+              const priorityLabel = Object.keys(cfg)
+                .find(priority => labels.includes(priority));
+
+              /*
+               * Sin etiqueta prioridad:* no es posible aplicar
+               * el tiempo ni la probabilidad configurados.
+               */
+              if (!priorityLabel) {
+                counters.missingPriority++;
+
+                writeDecision({
+                  issue: issue.number,
+                  title: issue.title,
+                  decision: 'NO_ELEGIBLE',
+                  reason: 'falta_etiqueta_prioridad',
+                  labels
+                });
+
+                continue;
+              }
+
+              const {
+                inactivityMs,
+                p,
+                mode
+              } = cfg[priorityLabel];
+
+              try {
+                const comments = await github.paginate(
+                  github.rest.issues.listComments,
+                  {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    per_page: 100
+                  }
+                );
+
+                /*
+                 * Se considera actividad humana únicamente aquella
+                 * realizada por cuentas cuyo tipo no sea Bot.
+                 */
+                const humanComments = comments
+                  .filter(comment => comment.user?.type !== 'Bot')
+                  .sort(
+                    (a, b) =>
+                      new Date(b.created_at).getTime() -
+                      new Date(a.created_at).getTime()
+                  );
+
+                const lastHumanComment = humanComments[0];
+
+                const lastHumanActivityMs = lastHumanComment
+                  ? new Date(lastHumanComment.created_at).getTime()
+                  : new Date(issue.created_at).getTime();
+
+                const inactiveFor = now - lastHumanActivityMs;
+
+                /*
+                 * Todavía no alcanzó la antigüedad mínima.
+                 */
+                if (inactiveFor < inactivityMs) {
+                  counters.insufficientInactivity++;
+
+                  writeDecision({
+                    issue: issue.number,
+                    title: issue.title,
+                    decision: 'NO_ELEGIBLE',
+                    reason: 'inactividad_insuficiente',
+                    priority: priorityLabel,
+                    inactiveDays: days(inactiveFor),
+                    requiredDays: days(inactivityMs),
+                    lastHumanActivity:
+                      isoDate(lastHumanActivityMs)
+                  });
+
+                  continue;
+                }
+
+                const automationComments = comments
+                  .filter(comment =>
+                    AUTO_MARKERS.some(marker =>
+                      (comment.body || '').includes(marker)
+                    )
+                  )
+                  .sort(
+                    (a, b) =>
+                      new Date(b.created_at).getTime() -
+                      new Date(a.created_at).getTime()
+                  );
+
+                const lastAutomation = automationComments[0];
+
+                /*
+                 * Busca comentarios humanos posteriores al último
+                 * recordatorio automático.
+                 */
+                const humansAfterAutomation = comments
+                  .filter(comment => comment.user?.type !== 'Bot')
+                  .filter(comment => {
+                    if (!lastAutomation) {
+                      return false;
+                    }
+
+                    return (
+                      new Date(comment.created_at).getTime() >
+                      new Date(lastAutomation.created_at).getTime()
+                    );
+                  })
+                  .sort(
+                    (a, b) =>
+                      new Date(b.created_at).getTime() -
+                      new Date(a.created_at).getTime()
+                  );
+
+                const lastHumanAfterAutomation =
+                  humansAfterAutomation[0];
+
+                /*
+                 * Un comentario humano posterior al aviso pausa
+                 * las notificaciones durante siete días.
+                 */
+                if (lastHumanAfterAutomation) {
+                  const humanCommentMs = new Date(
+                    lastHumanAfterAutomation.created_at
+                  ).getTime();
+
+                  const pauseUntil =
+                    humanCommentMs + PAUSE_MS;
+
+                  if (now < pauseUntil) {
+                    counters.pausedByHuman++;
+
+                    writeDecision({
+                      issue: issue.number,
+                      title: issue.title,
+                      decision: 'PAUSADO',
+                      reason:
+                        'comentario_humano_posterior_al_aviso',
+                      priority: priorityLabel,
+                      inactiveDays: days(inactiveFor),
+                      lastHumanActivity:
+                        isoDate(lastHumanActivityMs),
+                      lastHumanAfterAutomation:
+                        isoDate(humanCommentMs),
+                      resumeAt: isoDate(pauseUntil)
+                    });
+
+                    continue;
+                  }
+                }
+
+                /*
+                 * Ningún canal automático puede repetir sobre el
+                 * mismo issue antes de siete días.
+                 */
+                if (lastAutomation) {
+                  const lastAutomationMs = new Date(
+                    lastAutomation.created_at
+                  ).getTime();
+
+                  const pauseUntil =
+                    lastAutomationMs + PAUSE_MS;
+
+                  if (now < pauseUntil) {
+                    counters.pausedByAutomation++;
+
+                    writeDecision({
+                      issue: issue.number,
+                      title: issue.title,
+                      decision: 'PAUSADO',
+                      reason: 'aviso_automatico_reciente',
+                      priority: priorityLabel,
+                      inactiveDays: days(inactiveFor),
+                      lastAutomation:
+                        isoDate(lastAutomationMs),
+                      resumeAt: isoDate(pauseUntil)
+                    });
+
+                    continue;
+                  }
+                }
+
+                /*
+                 * Selección aleatoria ponderada.
+                 *
+                 * El valor se conserva expresamente en los logs
+                 * para justificar la decisión.
+                 */
+                const randomValue = Math.random();
+
+                const auditProbability = probability(p);
+                const auditRandomValue =
+                  probability(randomValue);
+
+                if (randomValue >= p) {
+                  counters.randomRejected++;
+
+                  writeDecision({
+                    issue: issue.number,
+                    title: issue.title,
+                    decision: 'NO_ENVIADO',
+                    reason: 'sorteo_probabilistico_negativo',
+                    priority: priorityLabel,
+                    inactiveDays: days(inactiveFor),
+                    requiredDays: days(inactivityMs),
+                    configuredProbability:
+                      auditProbability,
+                    randomValue: auditRandomValue,
+                    mode
+                  });
+
+                  continue;
+                }
+
+                const daysInactive = Math.floor(
+                  inactiveFor / DAY_MS
+                );
+
+                const formattedDate =
+                  formatArgentinaDate(lastHumanActivityMs);
+
+                const commentBody =
+                  mode === 'codex'
+                    ? [
+                        `<!-- ${CODEX_MARKER} -->`,
+                        '🤖 **Revisado por Codex Review**',
+                        '',
+                        '**Estado:** Inactividad detectada',
+                        `**Última actividad humana:** ${formattedDate}`,
+                        `**Días sin actividad:** ${daysInactive}`,
+                        `**Prioridad:** ${priorityLabel}`,
+                        '',
+                        '### Análisis',
+                        `- ✅ Issue bien definido: "${issue.title}"`,
+                        `- 📊 Descripción disponible: ${
+                          issue.body ? '✓' : '✗'
+                        }`,
+                        `- 🏷️ Etiquetas asignadas: ${
+                          labels.length > 0
+                            ? labels.join(', ')
+                            : 'Ninguna'
+                        }`,
+                        '',
+                        '### Acciones sugeridas',
+                        '1. 📝 Actualizar el estado del issue si continúa siendo relevante',
+                        '2. 👤 Asignar un responsable si requiere acción inmediata',
+                        '3. ✅ Cerrar el issue si ya no aplica',
+                        '4. 💬 Dejar un comentario para reactivar el ticket',
+                        '',
+                        '⏸️ Cualquier comentario humano pausará nuevas notificaciones automáticas por **7 días**.',
+                        '',
+                        `*Revisión automática realizada el ${
+                          formatArgentinaDate(now)
+                        } por Codex Review Agent*`
+                      ].join('\n')
+                    : [
+                        `<!-- ${REMINDER_MARKER} -->`,
+                        '⚠️ **Recordatorio automático por inactividad.**',
+                        '',
+                        `Prioridad detectada: **${priorityLabel}**.`,
+                        '',
+                        'Si el incidente sigue vigente, actualizá el estado o dejá un comentario.',
+                        '',
+                        '⏸️ Cualquier comentario humano pausará nuevas notificaciones automáticas por **7 días**.'
+                      ].join('\n');
+
+                /*
+                 * El registro se considera enviado únicamente
+                 * después de que GitHub confirma la creación.
+                 */
+                const response =
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    body: commentBody
+                  });
+
+                counters.notified++;
+
+                if (mode === 'codex') {
+                  counters.codexReviewed++;
+                } else {
+                  counters.normalNotified++;
+                }
+
+                writeDecision({
+                  issue: issue.number,
+                  title: issue.title,
+                  decision: 'ENVIADO',
+                  reason: 'seleccion_probabilistica_positiva',
+                  priority: priorityLabel,
+                  inactiveDays: days(inactiveFor),
+                  requiredDays: days(inactivityMs),
+                  configuredProbability:
+                    auditProbability,
+                  randomValue: auditRandomValue,
+                  mode,
+                  commentId: response.data.id,
+                  commentUrl: response.data.html_url
+                });
+              } catch (error) {
+                counters.errors++;
+
+                writeDecision({
+                  issue: issue.number,
+                  title: issue.title,
+                  decision: 'ERROR',
+                  reason: 'error_al_procesar_issue',
+                  priority: priorityLabel,
+                  message: error.message
+                });
+
+                core.error(
+                  `Issue #${issue.number}: ${error.stack || error.message}`
+                );
+              }
+            }
+
+            /*
+             * Resumen legible.
+             */
+            core.info('========== RESUMEN ==========');
+
+            core.info(
+              `Revisados: ${counters.checked}`
+            );
+
+            core.info(
+              `Avisos enviados: ${counters.notified}`
+            );
+
+            core.info(
+              `Avisos normales: ${counters.normalNotified}`
+            );
+
+            core.info(
+              `Revisiones Codex: ${counters.codexReviewed}`
+            );
+
+            core.info(
+              `Sin prioridad: ${counters.missingPriority}`
+            );
+
+            core.info(
+              `Inactividad insuficiente: ${
+                counters.insufficientInactivity
+              }`
+            );
+
+            core.info(
+              `Pausados por comentario humano: ${
+                counters.pausedByHuman
+              }`
+            );
+
+            core.info(
+              `Pausados por aviso automático: ${
+                counters.pausedByAutomation
+              }`
+            );
+
+            core.info(
+              `No seleccionados por sorteo: ${
+                counters.randomRejected
+              }`
+            );
+
+            core.info(
+              `Errores: ${counters.errors}`
+            );
+
+            /*
+             * Resumen visible en la página de ejecución.
+             */
+            await core.summary
+              .addHeading('Recordatorios de inactividad')
+              .addTable([
+                [
+                  { data: 'Resultado', header: true },
+                  { data: 'Cantidad', header: true }
+                ],
+                ['Issues revisados', String(counters.checked)],
+                ['Avisos enviados', String(counters.notified)],
+                [
+                  'Revisiones Codex',
+                  String(counters.codexReviewed)
+                ],
+                [
+                  'Recordatorios normales',
+                  String(counters.normalNotified)
+                ],
+                [
+                  'Sin etiqueta de prioridad',
+                  String(counters.missingPriority)
+                ],
+                [
+                  'Inactividad insuficiente',
+                  String(counters.insufficientInactivity)
+                ],
+                [
+                  'Pausados por actividad humana',
+                  String(counters.pausedByHuman)
+                ],
+                [
+                  'Pausados por aviso reciente',
+                  String(counters.pausedByAutomation)
+                ],
+                [
+                  'Descartados por sorteo',
+                  String(counters.randomRejected)
+                ],
+                ['Errores', String(counters.errors)]
+              ])
+              .addHeading('Auditoría de decisiones', 2)
+              .addCodeBlock(
+                JSON.stringify(auditLog, null, 2),
+                'json'
+              )
+              .write();
+
+            /*
+             * JSON completo en el log del job.
+             */
+            core.info('========== AUDIT_LOG_JSON ==========');
+            core.info(JSON.stringify(auditLog, null, 2));
+
+            /*
+             * Si hubo errores individuales, marca la ejecución como
+             * fallida después de terminar el resto de los issues.
+             */
+            if (counters.errors > 0) {
+              core.setFailed(
+                `Se produjeron errores al procesar ${
+                  counters.errors
+                } issue(s).`
+              );
+            }
