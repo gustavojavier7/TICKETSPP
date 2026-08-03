@@ -2,28 +2,34 @@ name: Assign PP Ticket ID
 
 on:
   issues:
-    types: [opened]
+    types:
+      - opened
 
 permissions:
   issues: write
 
 jobs:
   assign_pp_id:
+    name: Formalize and validate ticket
     runs-on: ubuntu-latest
+
     steps:
       - name: Build PP ID
         id: pp
+        shell: bash
         run: |
           ISSUE_NUMBER=${{ github.event.issue.number }}
           printf -v PADDED "%04d" "$ISSUE_NUMBER"
           echo "pp_id=PP-${PADDED}" >> "$GITHUB_OUTPUT"
 
       - name: Prefix issue title with PP ID
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
+        env:
+          PP_ID: ${{ steps.pp.outputs.pp_id }}
         with:
           script: |
             const issue = context.payload.issue;
-            const ppId = '${{ steps.pp.outputs.pp_id }}';
+            const ppId = process.env.PP_ID;
             const currentTitle = issue.title || '';
             const normalizedPrefix = `[${ppId}]`;
 
@@ -36,14 +42,346 @@ jobs:
               });
             }
 
-      - name: Add PP ID comment
-        uses: actions/github-script@v7
+      - name: Validate and formalize ticket
+        uses: actions/github-script@v8
+        env:
+          PP_ID: ${{ steps.pp.outputs.pp_id }}
         with:
           script: |
-            const ppId = '${{ steps.pp.outputs.pp_id }}';
+            const issue = context.payload.issue;
+            const body = issue.body || '';
+            const ppId = process.env.PP_ID;
+
+            /*
+             * Extrae el contenido situado debajo de un encabezado Markdown
+             * generado por GitHub Issue Forms.
+             *
+             * Ejemplo:
+             *
+             * ### PRIORIDAD
+             *
+             * ALTA
+             *
+             * ### ESTADO DEL TICKET
+             */
+            function extractField(heading) {
+              const escapedHeading = heading.replace(
+                /[.*+?^${}()|[\]\\]/g,
+                '\\$&'
+              );
+
+              const pattern = new RegExp(
+                `(?:^|\\n)###\\s+${escapedHeading}\\s*\\n+([\\s\\S]*?)(?=\\n###\\s+|$)`,
+                'i'
+              );
+
+              const match = body.match(pattern);
+
+              if (!match) {
+                return null;
+              }
+
+              const value = match[1]
+                .replace(/<!--[\s\S]*?-->/g, '')
+                .trim();
+
+              if (
+                !value ||
+                /^_?no response_?$/i.test(value) ||
+                /^n\/?a$/i.test(value) ||
+                /^sin datos$/i.test(value)
+              ) {
+                return null;
+              }
+
+              return value;
+            }
+
+            function normalize(value) {
+              return String(value || '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .trim()
+                .replace(/\s+/g, ' ')
+                .toUpperCase();
+            }
+
+            function slugify(value) {
+              return String(value || '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .toLowerCase()
+                .trim()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '');
+            }
+
+            const fields = {
+              solicitante: extractField('Solicitante'),
+              sistema: extractField('Sistema afectado'),
+              descripcion: extractField('DESCRIBE LA FALLA'),
+              tipoFalla: extractField('Tipo de falla'),
+              prioridad: extractField('PRIORIDAD'),
+              estado: extractField('ESTADO DEL TICKET')
+            };
+
+            /*
+             * Valores permitidos por la plantilla.
+             *
+             * Tipo de falla es un campo nuevo:
+             * - su existencia todavía NO es obligatoria;
+             * - si está presente, sí se controla que el valor sea válido.
+             */
+            const allowed = {
+              solicitante: [
+                'GUSTAVO LOPEZ',
+                'JENNIFER CASTILLA',
+                'EVELIN SOSA',
+                'JESUS MARTIN'
+              ],
+
+              sistema: [
+                'HIKVISION',
+                'DIGIFORT',
+                'CCURE'
+              ],
+
+              prioridad: [
+                'BAJA',
+                'MEDIA',
+                'ALTA',
+                'URGENTE'
+              ],
+
+              estado: [
+                'ABIERTO',
+                'EN CURSO',
+                'ESPERANDO RESPUESTA',
+                'CERRADO'
+              ],
+
+              tipoFalla: [
+                'SIN CONEXION',
+                'SIN GRABACION',
+                'FUERA DE FOCO',
+                'OBSTRUIDA',
+                'FALLA ELECTRICA',
+                'FALLA MECANICA',
+                'INTERMITENTE',
+                'OTRO'
+              ]
+            };
+
+            const errors = [];
+
+            /*
+             * Campos anteriores cuya existencia sí se valida.
+             */
+            if (!fields.solicitante) {
+              errors.push('Falta el campo **Solicitante**.');
+            } else if (
+              !allowed.solicitante.includes(normalize(fields.solicitante))
+            ) {
+              errors.push(
+                `El valor de **Solicitante** no es válido: \`${fields.solicitante}\`.`
+              );
+            }
+
+            if (!fields.sistema) {
+              errors.push('Falta el campo **Sistema afectado**.');
+            } else if (
+              !allowed.sistema.includes(normalize(fields.sistema))
+            ) {
+              errors.push(
+                `El valor de **Sistema afectado** no es válido: \`${fields.sistema}\`.`
+              );
+            }
+
+            if (!fields.descripcion) {
+              errors.push('Falta el campo **DESCRIBE LA FALLA**.');
+            } else {
+              const normalizedDescription = normalize(fields.descripcion);
+
+              if (
+                normalizedDescription.length < 10 ||
+                ['NO FUNCIONA', 'FALLA', 'REVISAR'].includes(
+                  normalizedDescription
+                )
+              ) {
+                errors.push(
+                  'La **Descripción de la falla** es demasiado breve o imprecisa.'
+                );
+              }
+            }
+
+            if (!fields.prioridad) {
+              errors.push('Falta el campo **PRIORIDAD**.');
+            } else if (
+              !allowed.prioridad.includes(normalize(fields.prioridad))
+            ) {
+              errors.push(
+                `El valor de **PRIORIDAD** no es válido: \`${fields.prioridad}\`.`
+              );
+            }
+
+            if (!fields.estado) {
+              errors.push('Falta el campo **ESTADO DEL TICKET**.');
+            } else if (
+              !allowed.estado.includes(normalize(fields.estado))
+            ) {
+              errors.push(
+                `El valor de **ESTADO DEL TICKET** no es válido: \`${fields.estado}\`.`
+              );
+            }
+
+            /*
+             * Campo nuevo: no genera alerta si está ausente.
+             * Solamente genera alerta si existe y contiene un valor desconocido.
+             */
+            if (
+              fields.tipoFalla &&
+              !allowed.tipoFalla.includes(normalize(fields.tipoFalla))
+            ) {
+              errors.push(
+                `El valor de **Tipo de falla** no es válido: \`${fields.tipoFalla}\`.`
+              );
+            }
+
+            /*
+             * Construcción de etiquetas operativas.
+             * Esto permite que Inactivity Reminders encuentre la prioridad.
+             */
+            const labelsToAdd = [
+              'tipo:registrar-ticket'
+            ];
+
+            const priorityLabels = {
+              BAJA: 'prioridad:baja',
+              MEDIA: 'prioridad:media',
+              ALTA: 'prioridad:alta',
+              URGENTE: 'prioridad:urgente'
+            };
+
+            const stateLabels = {
+              ABIERTO: 'estado:abierto',
+              'EN CURSO': 'estado:en-curso',
+              'ESPERANDO RESPUESTA': 'estado:esperando-respuesta',
+              CERRADO: 'estado:cerrado'
+            };
+
+            const systemLabels = {
+              HIKVISION: 'sistema:hikvision',
+              DIGIFORT: 'sistema:digifort',
+              CCURE: 'sistema:ccure'
+            };
+
+            const normalizedPriority = normalize(fields.prioridad);
+            const normalizedState = normalize(fields.estado);
+            const normalizedSystem = normalize(fields.sistema);
+
+            if (priorityLabels[normalizedPriority]) {
+              labelsToAdd.push(priorityLabels[normalizedPriority]);
+            }
+
+            if (stateLabels[normalizedState]) {
+              labelsToAdd.push(stateLabels[normalizedState]);
+            }
+
+            if (systemLabels[normalizedSystem]) {
+              labelsToAdd.push(systemLabels[normalizedSystem]);
+            }
+
+            if (fields.solicitante) {
+              labelsToAdd.push(
+                `solicitante:${slugify(fields.solicitante)}`
+              );
+            }
+
+            /*
+             * Conserva etiquetas no administradas y reemplaza solamente
+             * las categorías que controla este workflow.
+             */
+            const managedPrefixes = [
+              'prioridad:',
+              'estado:',
+              'sistema:',
+              'solicitante:'
+            ];
+
+            const existingLabels = (issue.labels || [])
+              .map(label =>
+                typeof label === 'string' ? label : label.name
+              )
+              .filter(Boolean);
+
+            const preservedLabels = existingLabels.filter(label =>
+              !managedPrefixes.some(prefix =>
+                label.toLowerCase().startsWith(prefix)
+              )
+            );
+
+            const finalLabels = [
+              ...new Set([
+                ...preservedLabels,
+                ...labelsToAdd
+              ])
+            ];
+
+            await github.rest.issues.setLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              labels: finalLabels
+            });
+
+            /*
+             * Resultado de la formalización.
+             */
+            const validationMarker =
+              '<!-- codex-connector-ticket-validation-v1 -->';
+
+            let commentBody;
+
+            if (errors.length > 0) {
+              commentBody = [
+                validationMarker,
+                `⚠️ **Codex-Connector: validación incompleta**`,
+                '',
+                `El ticket **${ppId}** fue creado, pero no pudo formalizarse completamente.`,
+                '',
+                '### Datos que deben corregirse',
+                ...errors.map(error => `- ${error}`),
+                '',
+                'Editá el contenido del ticket y corregí los campos indicados.',
+                '',
+                'Los recordatorios y clasificaciones automáticas pueden quedar incompletos hasta que el ticket sea válido.'
+              ].join('\n');
+            } else {
+              const tipoFallaStatus = fields.tipoFalla
+                ? `\`${fields.tipoFalla}\``
+                : 'no informado — todavía opcional';
+
+              commentBody = [
+                validationMarker,
+                `✅ **Codex-Connector: ticket formalizado**`,
+                '',
+                `Identificador asignado: **${ppId}**`,
+                '',
+                '### Validación',
+                `- Solicitante: \`${fields.solicitante}\``,
+                `- Sistema afectado: \`${fields.sistema}\``,
+                `- Prioridad: \`${fields.prioridad}\``,
+                `- Estado: \`${fields.estado}\``,
+                `- Tipo de falla: ${tipoFallaStatus}`,
+                `- Descripción: válida`,
+                '',
+                'Las etiquetas operativas fueron sincronizadas automáticamente.'
+              ].join('\n');
+            }
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.payload.issue.number,
-              body: `ID externo asignado automáticamente: **${ppId}**`
+              issue_number: issue.number,
+              body: commentBody
             });
