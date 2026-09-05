@@ -11,12 +11,12 @@ permissions:
   issues: write
 
 jobs:
-  reconcile_closed_state:
-    name: Reconcile closed issues and state labels
+  reconcile_state:
+    name: Reconcile issue state and state labels
     runs-on: ubuntu-latest
 
     steps:
-      - name: Detect, notify and repair closed-state inconsistencies
+      - name: Detect, notify and repair state inconsistencies
         uses: actions/github-script@v8
         with:
           script: |
@@ -25,10 +25,11 @@ jobs:
             const STATE_PREFIX = 'estado:';
 
             const counters = {
-              checkedClosed: 0,
+              checked: 0,
               consistent: 0,
+              closedLabelRepaired: 0,
+              issueClosedFromLabel: 0,
               inconsistent: 0,
-              repaired: 0,
               errors: 0
             };
 
@@ -40,38 +41,20 @@ jobs:
                 .filter(Boolean);
             }
 
-            async function upsertRepairComment(issue, body) {
-              const comments = await github.paginate(
-                github.rest.issues.listComments,
-                {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issue.number,
-                  per_page: 100
-                }
+            function canonicalClosedLabels(labels) {
+              const preserved = labels.filter(label =>
+                !label.toLowerCase().startsWith(STATE_PREFIX)
               );
 
-              const existing = comments
-                .filter(comment =>
-                  (comment.body || '').includes(REPAIR_MARKER)
-                )
-                .sort(
-                  (a, b) =>
-                    new Date(b.created_at).getTime() -
-                    new Date(a.created_at).getTime()
-                )[0];
+              return [
+                ...new Set([
+                  ...preserved,
+                  CLOSED_LABEL
+                ])
+              ];
+            }
 
-              if (existing) {
-                await github.rest.issues.updateComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: existing.id,
-                  body
-                });
-
-                return existing.id;
-              }
-
+            async function createRepairComment(issue, body) {
               const response = await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -82,158 +65,245 @@ jobs:
               return response.data.id;
             }
 
-            const closedIssues = await github.paginate(
+            async function updateRepairComment(commentId, body) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: commentId,
+                body
+              });
+            }
+
+            async function markFailure(commentId, issue, message, details) {
+              if (commentId === null) {
+                return;
+              }
+
+              const failureBody = [
+                `<!-- ${REPAIR_MARKER} -->`,
+                '❌ **Inconsistencia de estado detectada, pero la reparación automática falló**',
+                '',
+                message,
+                '',
+                ...details,
+                '',
+                'La inconsistencia sigue visible y la próxima ronda volverá a intentar la corrección.'
+              ].join('\n');
+
+              try {
+                await updateRepairComment(commentId, failureBody);
+              } catch (commentError) {
+                core.error(
+                  `Issue #${issue.number}: tampoco pudo actualizarse el aviso de fallo: ${commentError.message}`
+                );
+              }
+            }
+
+            const issues = await github.paginate(
               github.rest.issues.listForRepo,
               {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                state: 'closed',
+                state: 'all',
                 per_page: 100
               }
             );
 
-            core.info(
-              `Issues cerrados recuperados: ${closedIssues.length}`
-            );
+            core.info(`Issues recuperados: ${issues.length}`);
 
-            for (const issue of closedIssues) {
+            for (const issue of issues) {
               if (issue.pull_request) {
                 continue;
               }
 
-              counters.checkedClosed++;
+              counters.checked++;
 
               const labelsBefore = labelNames(issue);
-
-              if (labelsBefore.includes(CLOSED_LABEL)) {
-                counters.consistent++;
-                continue;
-              }
-
-              counters.inconsistent++;
-
+              const hasClosedLabel = labelsBefore.includes(CLOSED_LABEL);
               const previousStateLabels = labelsBefore.filter(label =>
                 label.toLowerCase().startsWith(STATE_PREFIX)
               );
 
-              const detectionBody = [
-                `<!-- ${REPAIR_MARKER} -->`,
-                '⚠️ **Inconsistencia de estado detectada**',
-                '',
-                `El Issue está **closed** en GitHub, pero no tenía la etiqueta canónica \`${CLOSED_LABEL}\`.`,
-                '',
-                `Etiquetas de estado detectadas: ${
-                  previousStateLabels.length > 0
-                    ? previousStateLabels.map(label => `\`${label}\``).join(', ')
-                    : 'ninguna'
-                }.`,
-                '',
-                `🔧 **Acción automática iniciada:** reemplazar cualquier etiqueta \`${STATE_PREFIX}*\` por \`${CLOSED_LABEL}\`.`,
-                '',
-                'Este aviso se genera antes de la reparación para que una falla de automatización nunca vuelva silenciosa la inconsistencia.'
-              ].join('\n');
+              /*
+               * Regla A:
+               * GitHub CLOSED es fuente de verdad para un Issue ya cerrado.
+               * Si la label no acompaña, primero se notifica y luego se
+               * reemplazan todas las estado:* por estado:cerrado.
+               */
+              if (issue.state === 'closed' && !hasClosedLabel) {
+                counters.inconsistent++;
 
-              let commentId = null;
-
-              try {
-                commentId = await upsertRepairComment(
-                  issue,
-                  detectionBody
-                );
-
-                const preservedLabels = labelsBefore.filter(label =>
-                  !label.toLowerCase().startsWith(STATE_PREFIX)
-                );
-
-                const finalLabels = [
-                  ...new Set([
-                    ...preservedLabels,
-                    CLOSED_LABEL
-                  ])
-                ];
-
-                await github.rest.issues.setLabels({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issue.number,
-                  labels: finalLabels
-                });
-
-                const successBody = [
+                const detectionBody = [
                   `<!-- ${REPAIR_MARKER} -->`,
-                  '✅ **Inconsistencia de estado corregida automáticamente**',
+                  '⚠️ **Inconsistencia de estado detectada**',
                   '',
-                  `El Issue ya estaba **closed** en GitHub, pero sus etiquetas de estado eran inconsistentes.`,
+                  `El Issue está **closed** en GitHub, pero no tenía la etiqueta canónica \`${CLOSED_LABEL}\`.`,
                   '',
-                  `Estado nativo de GitHub: \`closed\``,
-                  `Etiquetas de estado anteriores: ${
+                  `Etiquetas de estado detectadas: ${
                     previousStateLabels.length > 0
                       ? previousStateLabels.map(label => `\`${label}\``).join(', ')
                       : 'ninguna'
-                  }`,
-                  `Acción realizada: se eliminó cualquier \`${STATE_PREFIX}*\` anterior y se asignó \`${CLOSED_LABEL}\`.`,
+                  }.`,
                   '',
-                  'El ticket queda excluido correctamente del monitoreo de inactividad por estar cerrado.'
+                  `🔧 **Acción automática iniciada:** reemplazar cualquier etiqueta \`${STATE_PREFIX}*\` por \`${CLOSED_LABEL}\`.`,
+                  '',
+                  'Este aviso se genera antes de la reparación para que una falla de automatización nunca vuelva silenciosa la inconsistencia.'
                 ].join('\n');
 
-                await github.rest.issues.updateComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: commentId,
-                  body: successBody
-                });
+                let commentId = null;
 
-                counters.repaired++;
+                try {
+                  commentId = await createRepairComment(issue, detectionBody);
 
-                core.info(
-                  `Issue #${issue.number}: estado reconciliado -> ${CLOSED_LABEL}`
-                );
-              } catch (error) {
-                counters.errors++;
+                  await github.rest.issues.setLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    labels: canonicalClosedLabels(labelsBefore)
+                  });
 
-                core.error(
-                  `Issue #${issue.number}: fallo de reconciliación: ${error.message}`
-                );
-
-                if (commentId !== null) {
-                  const failureBody = [
+                  const successBody = [
                     `<!-- ${REPAIR_MARKER} -->`,
-                    '❌ **Inconsistencia de estado detectada, pero la reparación automática falló**',
+                    '✅ **Inconsistencia de estado corregida automáticamente**',
                     '',
-                    `El Issue está **closed** en GitHub y debería tener \`${CLOSED_LABEL}\`.`,
+                    'El Issue ya estaba **closed** en GitHub, pero sus etiquetas de estado eran inconsistentes.',
                     '',
-                    `Etiquetas de estado detectadas: ${
+                    'Estado nativo de GitHub: `closed`',
+                    `Etiquetas de estado anteriores: ${
                       previousStateLabels.length > 0
                         ? previousStateLabels.map(label => `\`${label}\``).join(', ')
                         : 'ninguna'
-                    }.`,
+                    }`,
+                    `Acción realizada: se eliminó cualquier \`${STATE_PREFIX}*\` anterior y se asignó \`${CLOSED_LABEL}\`.`,
                     '',
-                    `Error: \`${error.message}\``,
-                    '',
-                    'La próxima ronda volverá a intentar la corrección mientras la inconsistencia continúe.'
+                    'El ticket queda excluido correctamente del monitoreo de inactividad por estar cerrado.'
                   ].join('\n');
 
-                  try {
-                    await github.rest.issues.updateComment({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      comment_id: commentId,
-                      body: failureBody
-                    });
-                  } catch (commentError) {
-                    core.error(
-                      `Issue #${issue.number}: tampoco pudo actualizarse el aviso de fallo: ${commentError.message}`
-                    );
-                  }
+                  await updateRepairComment(commentId, successBody);
+
+                  counters.closedLabelRepaired++;
+                  core.info(
+                    `Issue #${issue.number}: labels reconciliadas -> ${CLOSED_LABEL}`
+                  );
+                } catch (error) {
+                  counters.errors++;
+                  core.error(
+                    `Issue #${issue.number}: fallo al reconciliar labels de cierre: ${error.message}`
+                  );
+
+                  await markFailure(
+                    commentId,
+                    issue,
+                    `El Issue está **closed** en GitHub y debería tener \`${CLOSED_LABEL}\`.`,
+                    [
+                      `Etiquetas de estado detectadas: ${
+                        previousStateLabels.length > 0
+                          ? previousStateLabels.map(label => `\`${label}\``).join(', ')
+                          : 'ninguna'
+                      }.`,
+                      `Error: \`${error.message}\``
+                    ]
+                  );
                 }
+
+                continue;
               }
+
+              /*
+               * Regla B:
+               * estado:cerrado es una orden operativa de cierre.
+               * Si el Issue sigue OPEN, primero se notifica y luego se
+               * cierra el Issue. También se limpian labels estado:*
+               * contradictorias para dejar sólo estado:cerrado.
+               */
+              if (issue.state === 'open' && hasClosedLabel) {
+                counters.inconsistent++;
+
+                const detectionBody = [
+                  `<!-- ${REPAIR_MARKER} -->`,
+                  '⚠️ **Inconsistencia de estado detectada**',
+                  '',
+                  `El Issue seguía **open** en GitHub, pero tenía la etiqueta operativa \`${CLOSED_LABEL}\`.`,
+                  '',
+                  `Etiquetas de estado detectadas: ${
+                    previousStateLabels.map(label => `\`${label}\``).join(', ')
+                  }.`,
+                  '',
+                  '🔧 **Acción automática iniciada:** cerrar el Issue en GitHub y conservar únicamente la etiqueta canónica `estado:cerrado`.',
+                  '',
+                  'Este aviso se genera antes del cierre para que la transición nunca ocurra de forma silenciosa.'
+                ].join('\n');
+
+                let commentId = null;
+
+                try {
+                  commentId = await createRepairComment(issue, detectionBody);
+
+                  await github.rest.issues.update({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    state: 'closed'
+                  });
+
+                  await github.rest.issues.setLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    labels: canonicalClosedLabels(labelsBefore)
+                  });
+
+                  const successBody = [
+                    `<!-- ${REPAIR_MARKER} -->`,
+                    '✅ **Inconsistencia de estado corregida automáticamente**',
+                    '',
+                    `El Issue estaba **open** en GitHub pero tenía \`${CLOSED_LABEL}\`.`,
+                    '',
+                    'Acciones realizadas:',
+                    '- El Issue fue cerrado automáticamente en GitHub.',
+                    `- Se eliminaron labels \`${STATE_PREFIX}*\` contradictorias y se conservó \`${CLOSED_LABEL}\`.`,
+                    '',
+                    'Estado final de GitHub: `closed`',
+                    `Estado operativo final: \`${CLOSED_LABEL}\``,
+                    '',
+                    'El ticket queda excluido correctamente del monitoreo de inactividad.'
+                  ].join('\n');
+
+                  await updateRepairComment(commentId, successBody);
+
+                  counters.issueClosedFromLabel++;
+                  core.info(
+                    `Issue #${issue.number}: cerrado automáticamente por ${CLOSED_LABEL}`
+                  );
+                } catch (error) {
+                  counters.errors++;
+                  core.error(
+                    `Issue #${issue.number}: fallo al cerrar desde label: ${error.message}`
+                  );
+
+                  await markFailure(
+                    commentId,
+                    issue,
+                    `El Issue estaba **open** en GitHub pero tenía \`${CLOSED_LABEL}\`.`,
+                    [
+                      'Acción esperada: cerrar el Issue y conservar únicamente `estado:cerrado`.',
+                      `Error: \`${error.message}\``
+                    ]
+                  );
+                }
+
+                continue;
+              }
+
+              counters.consistent++;
             }
 
             core.info(
-              `Resumen: revisados=${counters.checkedClosed}, ` +
+              `Resumen: revisados=${counters.checked}, ` +
               `consistentes=${counters.consistent}, ` +
               `inconsistentes=${counters.inconsistent}, ` +
-              `reparados=${counters.repaired}, ` +
+              `labels_cierre_reparadas=${counters.closedLabelRepaired}, ` +
+              `issues_cerrados_por_label=${counters.issueClosedFromLabel}, ` +
               `errores=${counters.errors}`
             );
 
