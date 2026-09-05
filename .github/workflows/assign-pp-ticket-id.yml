@@ -279,11 +279,38 @@ jobs:
               );
             }
 
+            const validationLabel = 'validacion:incompleta';
+
+            if (errors.length > 0) {
+              labelsToAdd.push(validationLabel);
+
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: validationLabel
+                });
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: validationLabel,
+                  color: 'd73a4a',
+                  description: 'Ticket con campos pendientes de corrección'
+                });
+              }
+            }
+
             const managedPrefixes = [
               'prioridad:',
               'estado:',
               'sistema:',
-              'solicitante:'
+              'solicitante:',
+              'validacion:'
             ];
 
             const existingLabels = (issue.labels || [])
@@ -343,6 +370,8 @@ jobs:
                 '',
                 priorityFallbackNote,
                 priorityFallbackNote ? '' : null,
+                `Etiqueta de seguimiento aplicada: \`${validationLabel}\`.`,
+                '',
                 '### Datos que deben corregirse',
                 ...errors.map(error => `- ${error}`),
                 '',
