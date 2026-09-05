@@ -119,25 +119,30 @@ jobs:
               counters.checked++;
 
               const labelsBefore = labelNames(issue);
-              const hasClosedLabel = labelsBefore.includes(CLOSED_LABEL);
               const previousStateLabels = labelsBefore.filter(label =>
                 label.toLowerCase().startsWith(STATE_PREFIX)
               );
+              const hasClosedLabel = previousStateLabels.some(label =>
+                label.toLowerCase() === CLOSED_LABEL
+              );
+              const hasCanonicalClosedState =
+                previousStateLabels.length === 1 &&
+                previousStateLabels[0].toLowerCase() === CLOSED_LABEL;
 
               /*
                * Regla A:
                * GitHub CLOSED es fuente de verdad para un Issue ya cerrado.
-               * Si la label no acompaña, primero se notifica y luego se
-               * reemplazan todas las estado:* por estado:cerrado.
+               * Si falta estado:cerrado o convive con otra estado:*, primero
+               * se notifica y luego se deja únicamente estado:cerrado.
                */
-              if (issue.state === 'closed' && !hasClosedLabel) {
+              if (issue.state === 'closed' && !hasCanonicalClosedState) {
                 counters.inconsistent++;
 
                 const detectionBody = [
                   `<!-- ${REPAIR_MARKER} -->`,
                   '⚠️ **Inconsistencia de estado detectada**',
                   '',
-                  `El Issue está **closed** en GitHub, pero no tenía la etiqueta canónica \`${CLOSED_LABEL}\`.`,
+                  `El Issue está **closed** en GitHub, pero sus etiquetas de estado no eran canónicas.`,
                   '',
                   `Etiquetas de estado detectadas: ${
                     previousStateLabels.length > 0
@@ -194,7 +199,7 @@ jobs:
                   await markFailure(
                     commentId,
                     issue,
-                    `El Issue está **closed** en GitHub y debería tener \`${CLOSED_LABEL}\`.`,
+                    `El Issue está **closed** en GitHub y debería conservar únicamente \`${CLOSED_LABEL}\` como etiqueta de estado.`,
                     [
                       `Etiquetas de estado detectadas: ${
                         previousStateLabels.length > 0
