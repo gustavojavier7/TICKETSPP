@@ -295,13 +295,21 @@ jobs:
                   throw error;
                 }
 
-                await github.rest.issues.createLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: validationLabel,
-                  color: 'd73a4a',
-                  description: 'Ticket con campos pendientes de corrección'
-                });
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name: validationLabel,
+                    color: 'd73a4a',
+                    description: 'Ticket con campos pendientes de corrección'
+                  });
+                } catch (createError) {
+                  // 422 puede significar que otra ejecución creó
+                  // la label entre el GET y el CREATE.
+                  if (createError.status !== 422) {
+                    throw createError;
+                  }
+                }
               }
             }
 
