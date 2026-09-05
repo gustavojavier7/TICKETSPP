@@ -6,7 +6,8 @@ Repositorio para la gestión de tickets de infraestructura de videovigilancia (C
 
 1. **Abrir un ticket** usando el template [Registrar ticket rápido](https://github.com/gustavojavier7/TICKETSPP/issues/new?template=registro-ticket-rapido.yml)
 2. El workflow `assign-pp-ticket-id` asigna automáticamente un ID `PP-XXXX` al título
-3. El workflow `inactivity-reminders` monitorea tickets abiertos y envía recordatorios según prioridad
+3. El mismo workflow valida y sincroniza las etiquetas operativas al crear el ticket y cada vez que una persona edita el Issue
+4. El workflow `inactivity-reminders` monitorea tickets abiertos y envía recordatorios según prioridad
 
 ## Labels
 
@@ -23,8 +24,21 @@ Repositorio para la gestión de tickets de infraestructura de videovigilancia (C
 
 | Workflow | Disparador | Acción |
 |---|---|---|
-| `assign-pp-ticket-id` | Nuevo issue | Asigna ID `PP-XXXX` y agrega comentario |
-| `inactivity-reminders` | Cada 12 h | Notifica issues inactivos según prioridad con pausa de 14 días tras respuesta humana |
+| `assign-pp-ticket-id` | Nuevo issue o edición humana | Asigna/conserva ID `PP-XXXX`, revalida campos y resincroniza labels operativas |
+| `inactivity-reminders` | Cada 8 h | Notifica issues inactivos según prioridad con pausa de 7 días tras actividad humana |
+
+### Actividad humana
+
+Para el cálculo de inactividad se consideran actividad humana:
+
+- comentarios y ediciones de comentarios realizados por personas;
+- ediciones del contenido o título del ticket;
+- cierres y reaperturas;
+- cambios humanos de labels, asignación y otros estados administrativos relevantes.
+
+Las acciones realizadas por cuentas de tipo `Bot` no reinician el reloj de inactividad.
+
+Después de una actividad humana posterior a un recordatorio automático, las nuevas notificaciones quedan pausadas durante 7 días.
 
 ## Scripts
 
@@ -46,8 +60,11 @@ bash scripts/normalize_legacy_labels.sh
 - **Solicitante**: dropdown (4 opciones)
 - **Sistema afectado**: dropdown (HIKVISION / DIGIFORT / CCURE)
 - **Describe la falla**: textarea con resumen para el título
+- **Tipo de falla**: dropdown opcional
 - **Prioridad**: dropdown (BAJA / MEDIA / ALTA / URGENTE)
 - **Estado del ticket**: dropdown (ABIERTO / EN CURSO / ESPERANDO RESPUESTA / CERRADO)
 - **Escalamiento condicional**: checkboxes múltiples
 - **Detalles o notas**: textarea
 - **Link / ID Ticket / Estado Anterior**: campos opcionales
+
+Cuando un ticket se edita, Codex-Connector vuelve a validar sus campos y mantiene sincronizadas las labels administradas (`prioridad:*`, `estado:*`, `sistema:*`, `solicitante:*`).
