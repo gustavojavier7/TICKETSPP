@@ -44,6 +44,283 @@ jobs:
               });
             }
 
+      - name: Notify semantic human edit diff
+        if: github.event.action == 'edited' && github.event.sender.type != 'Bot'
+        uses: actions/github-script@v8
+        env:
+          PP_ID: ${{ steps.pp.outputs.pp_id }}
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const ppId = process.env.PP_ID;
+            const changes = context.payload.changes || {};
+            const currentBody = issue.body || '';
+            const previousBody = changes.body?.from ?? currentBody;
+            const currentTitle = issue.title || '';
+            const previousTitle = changes.title?.from ?? currentTitle;
+            const actor = context.payload.sender?.login || 'usuario-desconocido';
+
+            function normalizeHeading(value) {
+              return String(value || '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .trim()
+                .replace(/\s+/g, ' ')
+                .toUpperCase();
+            }
+
+            function cleanFieldValue(raw) {
+              const value = String(raw || '')
+                .replace(/<!--[\s\S]*?-->/g, '')
+                .trim();
+
+              if (
+                !value ||
+                /^_?no response_?$/i.test(value) ||
+                /^none$/i.test(value) ||
+                /^n\/?a$/i.test(value) ||
+                /^sin datos$/i.test(value)
+              ) {
+                return null;
+              }
+
+              return value;
+            }
+
+            function parseSections(source) {
+              const result = new Map();
+              const pattern = /(?:^|\n)###\s+([^\n]+)\s*\n+([\s\S]*?)(?=\n###\s+|$)/g;
+              let match;
+
+              while ((match = pattern.exec(String(source || '')))) {
+                const heading = match[1].trim();
+                const key = normalizeHeading(heading);
+                result.set(key, {
+                  heading,
+                  value: cleanFieldValue(match[2])
+                });
+              }
+
+              return result;
+            }
+
+            function semantic(value) {
+              return String(value || '')
+                .replace(/\r\n/g, '\n')
+                .replace(/\s+/g, ' ')
+                .trim();
+            }
+
+            function preview(value) {
+              if (!value) {
+                return 'no informado';
+              }
+
+              const compact = String(value)
+                .replace(/`/g, "'")
+                .replace(/\s+/g, ' ')
+                .trim();
+
+              return compact.length > 320
+                ? `${compact.slice(0, 317)}...`
+                : compact;
+            }
+
+            function normalizeValue(value) {
+              return String(value || '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .trim()
+                .replace(/\s+/g, ' ')
+                .toUpperCase();
+            }
+
+            const before = parseSections(previousBody);
+            const after = parseSections(currentBody);
+            const changedFields = [];
+
+            if (semantic(previousTitle) !== semantic(currentTitle)) {
+              changedFields.push({
+                key: 'TITLE',
+                heading: 'Título',
+                before: previousTitle || null,
+                after: currentTitle || null
+              });
+            }
+
+            const keys = new Set([
+              ...before.keys(),
+              ...after.keys()
+            ]);
+
+            for (const key of keys) {
+              const oldField = before.get(key);
+              const newField = after.get(key);
+              const oldValue = oldField?.value ?? null;
+              const newValue = newField?.value ?? null;
+
+              if (semantic(oldValue) === semantic(newValue)) {
+                continue;
+              }
+
+              changedFields.push({
+                key,
+                heading: newField?.heading || oldField?.heading || key,
+                before: oldValue,
+                after: newValue
+              });
+            }
+
+            if (changedFields.length === 0) {
+              core.info(
+                `Issue #${issue.number}: edición humana sin cambios semánticos; no se notifica.`
+              );
+              return;
+            }
+
+            const eventStamp = new Date(
+              issue.updated_at || Date.now()
+            ).toISOString();
+            const diffMarker =
+              `<!-- ticket-semantic-diff-v1:${eventStamp} -->`;
+
+            // Idempotencia ante reintentos del mismo evento.
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                per_page: 100
+              }
+            );
+
+            if (
+              comments.some(comment =>
+                (comment.body || '').includes(diffMarker)
+              )
+            ) {
+              core.info(
+                `Issue #${issue.number}: diff del evento ya publicado.`
+              );
+              return;
+            }
+
+            const lines = [
+              diffMarker,
+              `📝 **${ppId} — actualización del ticket**`,
+              '',
+              `Modificado por: \`${actor}\``,
+              '',
+              '### Cambios detectados'
+            ];
+
+            for (const change of changedFields) {
+              lines.push(
+                `- **${change.heading}**`,
+                `  - Antes: \`${preview(change.before)}\``,
+                `  - Ahora: \`${preview(change.after)}\``
+              );
+            }
+
+            const effects = [];
+            const changedMap = new Map(
+              changedFields.map(change => [change.key, change])
+            );
+
+            if (changedMap.has('PRIORIDAD')) {
+              const value = normalizeValue(
+                changedMap.get('PRIORIDAD').after
+              );
+              const priorityLabels = {
+                BAJA: 'prioridad:baja',
+                MEDIA: 'prioridad:media',
+                ALTA: 'prioridad:alta',
+                URGENTE: 'prioridad:urgente'
+              };
+              const target = priorityLabels[value] || 'prioridad:media';
+              const suffix = priorityLabels[value]
+                ? ''
+                : ' provisional por valor ausente o inválido';
+              effects.push(`Prioridad operativa → \`${target}\`${suffix}.`);
+            }
+
+            if (changedMap.has('ESTADO DEL TICKET')) {
+              const value = normalizeValue(
+                changedMap.get('ESTADO DEL TICKET').after
+              );
+              const stateLabels = {
+                ABIERTO: 'estado:abierto',
+                'EN CURSO': 'estado:en-curso',
+                'ESPERANDO RESPUESTA': 'estado:esperando-respuesta',
+                CERRADO: 'estado:cerrado'
+              };
+              if (stateLabels[value]) {
+                effects.push(
+                  `Estado operativo → \`${stateLabels[value]}\`.`
+                );
+                if (value === 'CERRADO') {
+                  effects.push(
+                    'El guardia de consistencia cerrará el Issue en GitHub si todavía permanece abierto.'
+                  );
+                }
+              }
+            }
+
+            if (changedMap.has('SISTEMA AFECTADO')) {
+              const value = normalizeValue(
+                changedMap.get('SISTEMA AFECTADO').after
+              );
+              const systemLabels = {
+                HIKVISION: 'sistema:hikvision',
+                DIGIFORT: 'sistema:digifort',
+                CCURE: 'sistema:ccure'
+              };
+              if (systemLabels[value]) {
+                effects.push(`Sistema → \`${systemLabels[value]}\`.`);
+              }
+            }
+
+            if (changedMap.has('SOLICITANTE')) {
+              const raw = changedMap.get('SOLICITANTE').after;
+              const slug = String(raw || '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .toLowerCase()
+                .trim()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '');
+              if (slug) {
+                effects.push(`Solicitante → \`solicitante:${slug}\`.`);
+              }
+            }
+
+            if (effects.length > 0) {
+              lines.push(
+                '',
+                '### Efecto operativo esperado',
+                ...effects.map(effect => `- ${effect}`)
+              );
+            }
+
+            lines.push(
+              '',
+              'La modificación queda registrada como actividad humana. Codex-Connector continuará ahora con la validación y sincronización de etiquetas.'
+            );
+
+            // Fallar primero: el diff visible se publica antes de
+            // cualquier resincronización de etiquetas del paso siguiente.
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: lines.join('\n')
+            });
+
+            core.info(
+              `Issue #${issue.number}: diff semántico publicado (${changedFields.length} campo(s)).`
+            );
+
       - name: Validate and formalize ticket
         uses: actions/github-script@v8
         env:
