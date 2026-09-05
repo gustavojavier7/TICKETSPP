@@ -10,7 +10,8 @@ Repositorio para la gestión de tickets de infraestructura de videovigilancia (C
 4. Si el ticket no define prioridad, `assign-pp-ticket-id` aplica automáticamente `prioridad:media` y lo informa en el reporte de validación
 5. Si el ticket contiene una prioridad inválida, mantiene el error de validación pero aplica provisionalmente `prioridad:media` para evitar que el caso quede fuera del monitoreo
 6. Si cualquier campo obligatorio queda inválido, se aplica `validacion:incompleta`; la label se retira automáticamente cuando el ticket vuelve a validar correctamente
-7. El workflow `inactivity-reminders` monitorea tickets abiertos y envía recordatorios según prioridad
+7. El workflow `state-consistency-guard` revisa en cada ronda los Issues cerrados. Si GitHub indica `closed` pero la etiqueta de estado no es `estado:cerrado`, primero notifica la inconsistencia y luego reemplaza las etiquetas `estado:*` por `estado:cerrado`
+8. El workflow `inactivity-reminders` monitorea tickets abiertos y envía recordatorios según prioridad
 
 ## Labels
 
@@ -29,6 +30,7 @@ Repositorio para la gestión de tickets de infraestructura de videovigilancia (C
 | Workflow | Disparador | Acción |
 |---|---|---|
 | `assign-pp-ticket-id` | Nuevo issue o edición humana | Asigna/conserva ID `PP-XXXX`, revalida campos, aplica prioridad media por defecto o como fallback seguro ante prioridad inválida, marca validaciones incompletas y resincroniza labels operativas |
+| `state-consistency-guard` | Cada 8 h o manual | Usa el estado nativo de GitHub como autoridad para Issues cerrados; si falta `estado:cerrado`, notifica primero, corrige la etiqueta y confirma la acción en el aviso |
 | `inactivity-reminders` | Cada 8 h | Notifica issues inactivos según prioridad con pausa de 7 días tras actividad humana |
 
 ### Actividad humana
@@ -43,6 +45,17 @@ Para el cálculo de inactividad se consideran actividad humana:
 Las acciones realizadas por cuentas de tipo `Bot` no reinician el reloj de inactividad.
 
 Después de una actividad humana posterior a un recordatorio automático, las nuevas notificaciones quedan pausadas durante 7 días.
+
+### Consistencia de estado
+
+Para un Issue cuyo estado nativo de GitHub sea `closed`, la etiqueta canónica obligatoria es `estado:cerrado`.
+
+Si una ronda detecta un Issue `closed` con otra etiqueta `estado:*` o sin etiqueta de estado, el guardia de consistencia aplica un flujo de dos fases:
+
+1. publica o actualiza un aviso visible indicando la inconsistencia y la corrección que va a intentar;
+2. reemplaza las etiquetas `estado:*` por `estado:cerrado` y actualiza el aviso confirmando la reparación.
+
+Si la reparación falla, la inconsistencia permanece visible y la siguiente ronda vuelve a intentarla. Un Issue ya consistente no vuelve a generar el aviso.
 
 ## Scripts
 
