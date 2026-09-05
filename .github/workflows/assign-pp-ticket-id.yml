@@ -116,11 +116,6 @@ jobs:
               estado: extractField('ESTADO DEL TICKET')
             };
 
-            const priorityWasDefaulted = !fields.prioridad;
-            const effectivePriority = priorityWasDefaulted
-              ? 'MEDIA'
-              : fields.prioridad;
-
             const allowed = {
               solicitante: [
                 'GUSTAVO LOPEZ',
@@ -161,6 +156,20 @@ jobs:
               ]
             };
 
+            const priorityWasDefaulted = !fields.prioridad;
+            const priorityIsInvalid = Boolean(
+              fields.prioridad &&
+              !allowed.prioridad.includes(normalize(fields.prioridad))
+            );
+
+            // Fail-safe operativo:
+            // una prioridad ausente o inválida nunca deja al ticket
+            // fuera del monitoreo. MEDIA es el fallback conservador.
+            const effectivePriority =
+              priorityWasDefaulted || priorityIsInvalid
+                ? 'MEDIA'
+                : fields.prioridad;
+
             const errors = [];
 
             if (!fields.solicitante) {
@@ -200,12 +209,10 @@ jobs:
               }
             }
 
-            if (
-              fields.prioridad &&
-              !allowed.prioridad.includes(normalize(fields.prioridad))
-            ) {
+            if (priorityIsInvalid) {
               errors.push(
-                `El valor de **PRIORIDAD** no es válido: \`${fields.prioridad}\`.`
+                `El valor de **PRIORIDAD** no es válido: \`${fields.prioridad}\`. ` +
+                'Se aplicó provisionalmente `MEDIA` para mantener el ticket dentro del monitoreo.'
               );
             }
 
@@ -256,9 +263,7 @@ jobs:
             const normalizedState = normalize(fields.estado);
             const normalizedSystem = normalize(fields.sistema);
 
-            if (priorityLabels[normalizedPriority]) {
-              labelsToAdd.push(priorityLabels[normalizedPriority]);
-            }
+            labelsToAdd.push(priorityLabels[normalizedPriority]);
 
             if (stateLabels[normalizedState]) {
               labelsToAdd.push(stateLabels[normalizedState]);
@@ -320,9 +325,11 @@ jobs:
                 ).toISOString()} -->`
               : null;
 
-            const defaultPriorityNote = priorityWasDefaulted
+            const priorityFallbackNote = priorityWasDefaulted
               ? 'ℹ️ **Prioridad asignada automáticamente:** `MEDIA` (`prioridad:media`) porque el ticket no definía una prioridad.'
-              : null;
+              : priorityIsInvalid
+                ? `⚠️ **Prioridad provisional:** el valor \`${fields.prioridad}\` no es válido. Se asignó \`MEDIA\` (\`prioridad:media\`) para que el ticket no quede fuera del monitoreo hasta que se corrija.`
+                : null;
 
             let commentBody;
 
@@ -334,8 +341,8 @@ jobs:
                 '',
                 `El ticket **${ppId}** fue creado o actualizado, pero no pudo formalizarse completamente.`,
                 '',
-                defaultPriorityNote,
-                defaultPriorityNote ? '' : null,
+                priorityFallbackNote,
+                priorityFallbackNote ? '' : null,
                 '### Datos que deben corregirse',
                 ...errors.map(error => `- ${error}`),
                 '',
@@ -343,7 +350,7 @@ jobs:
                 '',
                 'Al guardar la edición, Codex-Connector volverá a validar y sincronizar las etiquetas automáticamente.',
                 '',
-                'Los recordatorios y clasificaciones automáticas pueden quedar incompletos hasta que el ticket sea válido.'
+                'El ticket seguirá dentro del monitoreo de inactividad con la prioridad operativa disponible.'
               ].filter(Boolean).join('\n');
             } else {
               const tipoFallaStatus = fields.tipoFalla
@@ -369,8 +376,8 @@ jobs:
                 `- Tipo de falla: ${tipoFallaStatus}`,
                 `- Descripción: válida`,
                 '',
-                defaultPriorityNote,
-                defaultPriorityNote ? '' : null,
+                priorityFallbackNote,
+                priorityFallbackNote ? '' : null,
                 'Las etiquetas operativas fueron sincronizadas automáticamente.'
               ].filter(Boolean).join('\n');
             }
