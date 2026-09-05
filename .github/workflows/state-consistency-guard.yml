@@ -1,0 +1,244 @@
+name: State Consistency Guard
+
+on:
+  schedule:
+    # Misma ronda operativa que los recordatorios de inactividad.
+    - cron: '15 */8 * * *'
+
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  reconcile_closed_state:
+    name: Reconcile closed issues and state labels
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Detect, notify and repair closed-state inconsistencies
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const REPAIR_MARKER = 'state-consistency-repair-v1';
+            const CLOSED_LABEL = 'estado:cerrado';
+            const STATE_PREFIX = 'estado:';
+
+            const counters = {
+              checkedClosed: 0,
+              consistent: 0,
+              inconsistent: 0,
+              repaired: 0,
+              errors: 0
+            };
+
+            function labelNames(issue) {
+              return (issue.labels || [])
+                .map(label =>
+                  typeof label === 'string' ? label : label.name
+                )
+                .filter(Boolean);
+            }
+
+            async function upsertRepairComment(issue, body) {
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  per_page: 100
+                }
+              );
+
+              const existing = comments
+                .filter(comment =>
+                  (comment.body || '').includes(REPAIR_MARKER)
+                )
+                .sort(
+                  (a, b) =>
+                    new Date(b.created_at).getTime() -
+                    new Date(a.created_at).getTime()
+                )[0];
+
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body
+                });
+
+                return existing.id;
+              }
+
+              const response = await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body
+              });
+
+              return response.data.id;
+            }
+
+            const closedIssues = await github.paginate(
+              github.rest.issues.listForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'closed',
+                per_page: 100
+              }
+            );
+
+            core.info(
+              `Issues cerrados recuperados: ${closedIssues.length}`
+            );
+
+            for (const issue of closedIssues) {
+              if (issue.pull_request) {
+                continue;
+              }
+
+              counters.checkedClosed++;
+
+              const labelsBefore = labelNames(issue);
+
+              if (labelsBefore.includes(CLOSED_LABEL)) {
+                counters.consistent++;
+                continue;
+              }
+
+              counters.inconsistent++;
+
+              const previousStateLabels = labelsBefore.filter(label =>
+                label.toLowerCase().startsWith(STATE_PREFIX)
+              );
+
+              const detectionBody = [
+                `<!-- ${REPAIR_MARKER} -->`,
+                '⚠️ **Inconsistencia de estado detectada**',
+                '',
+                `El Issue está **closed** en GitHub, pero no tenía la etiqueta canónica \`${CLOSED_LABEL}\`.`,
+                '',
+                `Etiquetas de estado detectadas: ${
+                  previousStateLabels.length > 0
+                    ? previousStateLabels.map(label => `\`${label}\``).join(', ')
+                    : 'ninguna'
+                }.`,
+                '',
+                `🔧 **Acción automática iniciada:** reemplazar cualquier etiqueta \`${STATE_PREFIX}*\` por \`${CLOSED_LABEL}\`.`,
+                '',
+                'Este aviso se genera antes de la reparación para que una falla de automatización nunca vuelva silenciosa la inconsistencia.'
+              ].join('\n');
+
+              let commentId = null;
+
+              try {
+                commentId = await upsertRepairComment(
+                  issue,
+                  detectionBody
+                );
+
+                const preservedLabels = labelsBefore.filter(label =>
+                  !label.toLowerCase().startsWith(STATE_PREFIX)
+                );
+
+                const finalLabels = [
+                  ...new Set([
+                    ...preservedLabels,
+                    CLOSED_LABEL
+                  ])
+                ];
+
+                await github.rest.issues.setLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: finalLabels
+                });
+
+                const successBody = [
+                  `<!-- ${REPAIR_MARKER} -->`,
+                  '✅ **Inconsistencia de estado corregida automáticamente**',
+                  '',
+                  `El Issue ya estaba **closed** en GitHub, pero sus etiquetas de estado eran inconsistentes.`,
+                  '',
+                  `Estado nativo de GitHub: \`closed\``,
+                  `Etiquetas de estado anteriores: ${
+                    previousStateLabels.length > 0
+                      ? previousStateLabels.map(label => `\`${label}\``).join(', ')
+                      : 'ninguna'
+                  }`,
+                  `Acción realizada: se eliminó cualquier \`${STATE_PREFIX}*\` anterior y se asignó \`${CLOSED_LABEL}\`.`,
+                  '',
+                  'El ticket queda excluido correctamente del monitoreo de inactividad por estar cerrado.'
+                ].join('\n');
+
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: commentId,
+                  body: successBody
+                });
+
+                counters.repaired++;
+
+                core.info(
+                  `Issue #${issue.number}: estado reconciliado -> ${CLOSED_LABEL}`
+                );
+              } catch (error) {
+                counters.errors++;
+
+                core.error(
+                  `Issue #${issue.number}: fallo de reconciliación: ${error.message}`
+                );
+
+                if (commentId !== null) {
+                  const failureBody = [
+                    `<!-- ${REPAIR_MARKER} -->`,
+                    '❌ **Inconsistencia de estado detectada, pero la reparación automática falló**',
+                    '',
+                    `El Issue está **closed** en GitHub y debería tener \`${CLOSED_LABEL}\`.`,
+                    '',
+                    `Etiquetas de estado detectadas: ${
+                      previousStateLabels.length > 0
+                        ? previousStateLabels.map(label => `\`${label}\``).join(', ')
+                        : 'ninguna'
+                    }.`,
+                    '',
+                    `Error: \`${error.message}\``,
+                    '',
+                    'La próxima ronda volverá a intentar la corrección mientras la inconsistencia continúe.'
+                  ].join('\n');
+
+                  try {
+                    await github.rest.issues.updateComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      comment_id: commentId,
+                      body: failureBody
+                    });
+                  } catch (commentError) {
+                    core.error(
+                      `Issue #${issue.number}: tampoco pudo actualizarse el aviso de fallo: ${commentError.message}`
+                    );
+                  }
+                }
+              }
+            }
+
+            core.info(
+              `Resumen: revisados=${counters.checkedClosed}, ` +
+              `consistentes=${counters.consistent}, ` +
+              `inconsistentes=${counters.inconsistent}, ` +
+              `reparados=${counters.repaired}, ` +
+              `errores=${counters.errors}`
+            );
+
+            if (counters.errors > 0) {
+              core.setFailed(
+                `Hubo ${counters.errors} error(es) al reconciliar estados.`
+              );
+            }
