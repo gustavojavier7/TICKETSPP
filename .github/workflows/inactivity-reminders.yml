@@ -2,12 +2,6 @@ name: Inactivity Reminders
 
 on:
   schedule:
-    # Ejecución inicial de prueba:
-    # 03/08/2026 17:10 Argentina = 20:10 UTC.
-    # Esta regla volvería a coincidir cada 3 de agosto,
-    # por lo que debe eliminarse después de la prueba inicial.
-    - cron: '10 20 3 8 *'
-
     # Curso normal: cada 8 horas, al minuto 15.
     # Argentina: aproximadamente 05:15, 13:15 y 21:15.
     - cron: '15 */8 * * *'
@@ -36,11 +30,32 @@ jobs:
 
             const REMINDER_MARKER = 'recordatorio-inactividad-v1';
             const CODEX_MARKER = 'codex-review-inactivity-v1';
+            const VALIDATION_MARKER =
+              'codex-connector-ticket-validation-v1';
+            const HUMAN_ACTIVITY_PATTERN =
+              /<!-- human-activity-v1:([^>]+) -->/g;
 
             const AUTO_MARKERS = [
               REMINDER_MARKER,
               CODEX_MARKER
             ];
+
+            const HUMAN_TIMELINE_EVENTS = new Set([
+              'edited',
+              'renamed',
+              'closed',
+              'reopened',
+              'labeled',
+              'unlabeled',
+              'assigned',
+              'unassigned',
+              'milestoned',
+              'demilestoned',
+              'locked',
+              'unlocked',
+              'pinned',
+              'unpinned'
+            ]);
 
             /*
              * Configuración por prioridad:
@@ -80,10 +95,6 @@ jobs:
               }
             };
 
-            /*
-             * Auditoría completa de decisiones.
-             * Cada issue genera una entrada, haya aviso o no.
-             */
             const auditLog = [];
 
             const counters = {
@@ -126,6 +137,11 @@ jobs:
               }).format(new Date(ms));
             }
 
+            function timeMs(value) {
+              const parsed = new Date(value).getTime();
+              return Number.isFinite(parsed) ? parsed : null;
+            }
+
             function writeDecision(entry) {
               auditLog.push(entry);
 
@@ -145,6 +161,12 @@ jobs:
 
               if (entry.requiredDays !== undefined) {
                 parts.push(`mínimo=${entry.requiredDays}d`);
+              }
+
+              if (entry.lastHumanActivitySource) {
+                parts.push(
+                  `actividad=${entry.lastHumanActivitySource}`
+                );
               }
 
               if (entry.configuredProbability !== undefined) {
@@ -192,9 +214,6 @@ jobs:
             );
 
             for (const issue of issues) {
-              /*
-               * La API de issues también devuelve pull requests.
-               */
               if (issue.pull_request) {
                 counters.skippedPullRequests++;
 
@@ -218,10 +237,6 @@ jobs:
                 )
                 .filter(Boolean);
 
-              /*
-               * Aunque el issue esté abierto en GitHub, la etiqueta
-               * administrativa estado:cerrado lo excluye.
-               */
               if (labels.includes('estado:cerrado')) {
                 counters.skippedClosedLabel++;
 
@@ -238,10 +253,6 @@ jobs:
               const priorityLabel = Object.keys(cfg)
                 .find(priority => labels.includes(priority));
 
-              /*
-               * Sin etiqueta prioridad:* no es posible aplicar
-               * el tiempo ni la probabilidad configurados.
-               */
               if (!priorityLabel) {
                 counters.missingPriority++;
 
@@ -273,46 +284,123 @@ jobs:
                   }
                 );
 
+                const timelineEvents = await github.paginate(
+                  github.rest.issues.listEventsForTimeline,
+                  {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    per_page: 100
+                  }
+                );
+
                 /*
-                 * Se considera actividad humana únicamente aquella
-                 * realizada por cuentas cuyo tipo no sea Bot.
+                 * La actividad humana incluye:
+                 * - creación del ticket;
+                 * - comentarios humanos y sus ediciones;
+                 * - ediciones del Issue registradas por el workflow
+                 *   de formalización mediante marcador oculto;
+                 * - cambios humanos de estado, labels, título,
+                 *   asignación y otros eventos administrativos.
+                 *
+                 * Se excluyen explícitamente actores Bot para que
+                 * las automatizaciones no reinicien el reloj.
                  */
-                const humanComments = comments
-                  .filter(comment => comment.user?.type !== 'Bot')
-                  .sort(
-                    (a, b) =>
-                      new Date(b.created_at).getTime() -
-                      new Date(a.created_at).getTime()
+                const activityCandidates = [];
+
+                const createdMs = timeMs(issue.created_at);
+                if (createdMs !== null) {
+                  activityCandidates.push({
+                    ms: createdMs,
+                    source: 'creacion_issue'
+                  });
+                }
+
+                for (const comment of comments) {
+                  if (comment.user?.type === 'Bot') {
+                    continue;
+                  }
+
+                  const createdCommentMs = timeMs(
+                    comment.created_at
+                  );
+                  const updatedCommentMs = timeMs(
+                    comment.updated_at
                   );
 
-                const lastHumanComment = humanComments[0];
+                  if (createdCommentMs !== null) {
+                    activityCandidates.push({
+                      ms: createdCommentMs,
+                      source: 'comentario_humano'
+                    });
+                  }
 
-                const lastHumanActivityMs = lastHumanComment
-                  ? new Date(lastHumanComment.created_at).getTime()
-                  : new Date(issue.created_at).getTime();
-
-                const inactiveFor = now - lastHumanActivityMs;
-
-                /*
-                 * Todavía no alcanzó la antigüedad mínima.
-                 */
-                if (inactiveFor < inactivityMs) {
-                  counters.insufficientInactivity++;
-
-                  writeDecision({
-                    issue: issue.number,
-                    title: issue.title,
-                    decision: 'NO_ELEGIBLE',
-                    reason: 'inactividad_insuficiente',
-                    priority: priorityLabel,
-                    inactiveDays: days(inactiveFor),
-                    requiredDays: days(inactivityMs),
-                    lastHumanActivity:
-                      isoDate(lastHumanActivityMs)
-                  });
-
-                  continue;
+                  if (
+                    updatedCommentMs !== null &&
+                    updatedCommentMs !== createdCommentMs
+                  ) {
+                    activityCandidates.push({
+                      ms: updatedCommentMs,
+                      source: 'edicion_comentario_humano'
+                    });
+                  }
                 }
+
+                for (const comment of comments) {
+                  const commentBody = comment.body || '';
+
+                  if (!commentBody.includes(VALIDATION_MARKER)) {
+                    continue;
+                  }
+
+                  HUMAN_ACTIVITY_PATTERN.lastIndex = 0;
+                  let match;
+
+                  while (
+                    (match = HUMAN_ACTIVITY_PATTERN.exec(commentBody))
+                  ) {
+                    const editMs = timeMs(match[1]);
+
+                    if (editMs !== null) {
+                      activityCandidates.push({
+                        ms: editMs,
+                        source: 'edicion_ticket_humana'
+                      });
+                    }
+                  }
+                }
+
+                for (const event of timelineEvents) {
+                  if (
+                    !HUMAN_TIMELINE_EVENTS.has(event.event) ||
+                    event.actor?.type === 'Bot'
+                  ) {
+                    continue;
+                  }
+
+                  const eventMs = timeMs(event.created_at);
+
+                  if (eventMs !== null) {
+                    activityCandidates.push({
+                      ms: eventMs,
+                      source: `timeline:${event.event}`
+                    });
+                  }
+                }
+
+                activityCandidates.sort((a, b) => b.ms - a.ms);
+
+                const lastHumanActivity =
+                  activityCandidates[0] || {
+                    ms: createdMs,
+                    source: 'creacion_issue'
+                  };
+
+                const lastHumanActivityMs =
+                  lastHumanActivity.ms;
+
+                const inactiveFor =
+                  now - lastHumanActivityMs;
 
                 const automationComments = comments
                   .filter(comment =>
@@ -327,43 +415,21 @@ jobs:
                   );
 
                 const lastAutomation = automationComments[0];
+                const lastAutomationMs = lastAutomation
+                  ? timeMs(lastAutomation.created_at)
+                  : null;
 
                 /*
-                 * Busca comentarios humanos posteriores al último
-                 * recordatorio automático.
+                 * Si hubo cualquier actividad humana después del
+                 * último aviso automático, se aplica la pausa de
+                 * siete días desde esa actividad.
                  */
-                const humansAfterAutomation = comments
-                  .filter(comment => comment.user?.type !== 'Bot')
-                  .filter(comment => {
-                    if (!lastAutomation) {
-                      return false;
-                    }
-
-                    return (
-                      new Date(comment.created_at).getTime() >
-                      new Date(lastAutomation.created_at).getTime()
-                    );
-                  })
-                  .sort(
-                    (a, b) =>
-                      new Date(b.created_at).getTime() -
-                      new Date(a.created_at).getTime()
-                  );
-
-                const lastHumanAfterAutomation =
-                  humansAfterAutomation[0];
-
-                /*
-                 * Un comentario humano posterior al aviso pausa
-                 * las notificaciones durante siete días.
-                 */
-                if (lastHumanAfterAutomation) {
-                  const humanCommentMs = new Date(
-                    lastHumanAfterAutomation.created_at
-                  ).getTime();
-
+                if (
+                  lastAutomationMs !== null &&
+                  lastHumanActivityMs > lastAutomationMs
+                ) {
                   const pauseUntil =
-                    humanCommentMs + PAUSE_MS;
+                    lastHumanActivityMs + PAUSE_MS;
 
                   if (now < pauseUntil) {
                     counters.pausedByHuman++;
@@ -373,13 +439,13 @@ jobs:
                       title: issue.title,
                       decision: 'PAUSADO',
                       reason:
-                        'comentario_humano_posterior_al_aviso',
+                        'actividad_humana_posterior_al_aviso',
                       priority: priorityLabel,
                       inactiveDays: days(inactiveFor),
                       lastHumanActivity:
                         isoDate(lastHumanActivityMs),
-                      lastHumanAfterAutomation:
-                        isoDate(humanCommentMs),
+                      lastHumanActivitySource:
+                        lastHumanActivity.source,
                       resumeAt: isoDate(pauseUntil)
                     });
 
@@ -387,15 +453,27 @@ jobs:
                   }
                 }
 
-                /*
-                 * Ningún canal automático puede repetir sobre el
-                 * mismo issue antes de siete días.
-                 */
-                if (lastAutomation) {
-                  const lastAutomationMs = new Date(
-                    lastAutomation.created_at
-                  ).getTime();
+                if (inactiveFor < inactivityMs) {
+                  counters.insufficientInactivity++;
 
+                  writeDecision({
+                    issue: issue.number,
+                    title: issue.title,
+                    decision: 'NO_ELEGIBLE',
+                    reason: 'inactividad_insuficiente',
+                    priority: priorityLabel,
+                    inactiveDays: days(inactiveFor),
+                    requiredDays: days(inactivityMs),
+                    lastHumanActivity:
+                      isoDate(lastHumanActivityMs),
+                    lastHumanActivitySource:
+                      lastHumanActivity.source
+                  });
+
+                  continue;
+                }
+
+                if (lastAutomationMs !== null) {
                   const pauseUntil =
                     lastAutomationMs + PAUSE_MS;
 
@@ -409,6 +487,10 @@ jobs:
                       reason: 'aviso_automatico_reciente',
                       priority: priorityLabel,
                       inactiveDays: days(inactiveFor),
+                      lastHumanActivity:
+                        isoDate(lastHumanActivityMs),
+                      lastHumanActivitySource:
+                        lastHumanActivity.source,
                       lastAutomation:
                         isoDate(lastAutomationMs),
                       resumeAt: isoDate(pauseUntil)
@@ -418,12 +500,6 @@ jobs:
                   }
                 }
 
-                /*
-                 * Selección aleatoria ponderada.
-                 *
-                 * El valor se conserva expresamente en los logs
-                 * para justificar la decisión.
-                 */
                 const randomValue = Math.random();
 
                 const auditProbability = probability(p);
@@ -441,6 +517,10 @@ jobs:
                     priority: priorityLabel,
                     inactiveDays: days(inactiveFor),
                     requiredDays: days(inactivityMs),
+                    lastHumanActivity:
+                      isoDate(lastHumanActivityMs),
+                    lastHumanActivitySource:
+                      lastHumanActivity.source,
                     configuredProbability:
                       auditProbability,
                     randomValue: auditRandomValue,
@@ -480,12 +560,12 @@ jobs:
                         }`,
                         '',
                         '### Acciones sugeridas',
-                        '1. 📝 Actualizar el estado del issue si continúa siendo relevante',
+                        '1. 📝 Actualizar el estado o editar el ticket si continúa siendo relevante',
                         '2. 👤 Asignar un responsable si requiere acción inmediata',
                         '3. ✅ Cerrar el issue si ya no aplica',
-                        '4. 💬 Dejar un comentario para reactivar el ticket',
+                        '4. 💬 Dejar un comentario con novedades cuando corresponda',
                         '',
-                        '⏸️ Cualquier comentario humano pausará nuevas notificaciones automáticas por **7 días**.',
+                        '⏸️ Una actividad humana —comentario, edición o cambio de estado/labels— pausa nuevas notificaciones automáticas por **7 días**.',
                         '',
                         `*Revisión automática realizada el ${
                           formatArgentinaDate(now)
@@ -497,15 +577,11 @@ jobs:
                         '',
                         `Prioridad detectada: **${priorityLabel}**.`,
                         '',
-                        'Si el incidente sigue vigente, actualizá el estado o dejá un comentario.',
+                        'Si el incidente sigue vigente, actualizá el estado, editá el ticket o dejá un comentario.',
                         '',
-                        '⏸️ Cualquier comentario humano pausará nuevas notificaciones automáticas por **7 días**.'
+                        '⏸️ Una actividad humana —comentario, edición o cambio de estado/labels— pausa nuevas notificaciones automáticas por **7 días**.'
                       ].join('\n');
 
-                /*
-                 * El registro se considera enviado únicamente
-                 * después de que GitHub confirma la creación.
-                 */
                 const response =
                   await github.rest.issues.createComment({
                     owner: context.repo.owner,
@@ -530,6 +606,10 @@ jobs:
                   priority: priorityLabel,
                   inactiveDays: days(inactiveFor),
                   requiredDays: days(inactivityMs),
+                  lastHumanActivity:
+                    isoDate(lastHumanActivityMs),
+                  lastHumanActivitySource:
+                    lastHumanActivity.source,
                   configuredProbability:
                     auditProbability,
                   randomValue: auditRandomValue,
@@ -555,9 +635,6 @@ jobs:
               }
             }
 
-            /*
-             * Resumen legible.
-             */
             core.info('========== RESUMEN ==========');
 
             core.info(
@@ -587,7 +664,7 @@ jobs:
             );
 
             core.info(
-              `Pausados por comentario humano: ${
+              `Pausados por actividad humana: ${
                 counters.pausedByHuman
               }`
             );
@@ -608,9 +685,6 @@ jobs:
               `Errores: ${counters.errors}`
             );
 
-            /*
-             * Resumen visible en la página de ejecución.
-             */
             await core.summary
               .addHeading('Recordatorios de inactividad')
               .addTable([
@@ -657,16 +731,9 @@ jobs:
               )
               .write();
 
-            /*
-             * JSON completo en el log del job.
-             */
             core.info('========== AUDIT_LOG_JSON ==========');
             core.info(JSON.stringify(auditLog, null, 2));
 
-            /*
-             * Si hubo errores individuales, marca la ejecución como
-             * fallida después de terminar el resto de los issues.
-             */
             if (counters.errors > 0) {
               core.setFailed(
                 `Se produjeron errores al procesar ${
