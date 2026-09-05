@@ -8,7 +8,8 @@ Repositorio para la gestión de tickets de infraestructura de videovigilancia (C
 2. El workflow `assign-pp-ticket-id` asigna automáticamente un ID `PP-XXXX` al título
 3. El mismo workflow valida y sincroniza las etiquetas operativas al crear el ticket y cada vez que una persona edita el Issue
 4. Si el ticket no define prioridad, `assign-pp-ticket-id` aplica automáticamente `prioridad:media` y lo informa en el reporte de validación
-5. El workflow `inactivity-reminders` monitorea tickets abiertos y envía recordatorios según prioridad
+5. Si el ticket contiene una prioridad inválida, mantiene el error de validación pero aplica provisionalmente `prioridad:media` para evitar que el caso quede fuera del monitoreo
+6. El workflow `inactivity-reminders` monitorea tickets abiertos y envía recordatorios según prioridad
 
 ## Labels
 
@@ -25,7 +26,7 @@ Repositorio para la gestión de tickets de infraestructura de videovigilancia (C
 
 | Workflow | Disparador | Acción |
 |---|---|---|
-| `assign-pp-ticket-id` | Nuevo issue o edición humana | Asigna/conserva ID `PP-XXXX`, revalida campos, aplica prioridad media por defecto cuando falta y resincroniza labels operativas |
+| `assign-pp-ticket-id` | Nuevo issue o edición humana | Asigna/conserva ID `PP-XXXX`, revalida campos, aplica prioridad media por defecto o como fallback seguro ante prioridad inválida y resincroniza labels operativas |
 | `inactivity-reminders` | Cada 8 h | Notifica issues inactivos según prioridad con pausa de 7 días tras actividad humana |
 
 ### Actividad humana
@@ -62,7 +63,7 @@ bash scripts/normalize_legacy_labels.sh
 - **Sistema afectado**: dropdown (HIKVISION / DIGIFORT / CCURE)
 - **Describe la falla**: textarea con resumen para el título
 - **Tipo de falla**: dropdown opcional
-- **Prioridad**: dropdown (BAJA / MEDIA / ALTA / URGENTE). Si el campo falta, se asigna automáticamente `MEDIA`
+- **Prioridad**: dropdown (BAJA / MEDIA / ALTA / URGENTE). Si el campo falta se asigna automáticamente `MEDIA`; si contiene un valor inválido se conserva el error de validación pero se usa provisionalmente `MEDIA` para mantener el ticket dentro del monitoreo
 - **Estado del ticket**: dropdown (ABIERTO / EN CURSO / ESPERANDO RESPUESTA / CERRADO)
 - **Escalamiento condicional**: checkboxes múltiples
 - **Detalles o notas**: textarea
