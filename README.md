@@ -9,7 +9,8 @@ Repositorio para la gestión de tickets de infraestructura de videovigilancia (C
 3. El mismo workflow valida y sincroniza las etiquetas operativas al crear el ticket y cada vez que una persona edita el Issue
 4. Si el ticket no define prioridad, `assign-pp-ticket-id` aplica automáticamente `prioridad:media` y lo informa en el reporte de validación
 5. Si el ticket contiene una prioridad inválida, mantiene el error de validación pero aplica provisionalmente `prioridad:media` para evitar que el caso quede fuera del monitoreo
-6. El workflow `inactivity-reminders` monitorea tickets abiertos y envía recordatorios según prioridad
+6. Si cualquier campo obligatorio queda inválido, se aplica `validacion:incompleta`; la label se retira automáticamente cuando el ticket vuelve a validar correctamente
+7. El workflow `inactivity-reminders` monitorea tickets abiertos y envía recordatorios según prioridad
 
 ## Labels
 
@@ -20,13 +21,14 @@ Repositorio para la gestión de tickets de infraestructura de videovigilancia (C
 | `estado:` | `abierto`, `en-curso`, `esperando-respuesta`, `cerrado` | Ciclo de vida |
 | `sistema:` | `digifort`, `hikvision`, `ccure`, `windows`, `redes` | Sistema afectado |
 | `solicitante:` | `evelin-sosa`, `jennifer-castilla`, `jesus-martin`, `gustavo-lopez` | Quién reporta |
+| `validacion:` | `incompleta` | Ticket con campos pendientes de corrección; no lo excluye del monitoreo |
 | `escalamiento:` | `respuesta-proveedor-recibida`, `requiere-reemplazos`, `visita-en-sitio`, `capex`, `bloqueado-tercero` | Acciones requeridas |
 
 ## Automatización
 
 | Workflow | Disparador | Acción |
 |---|---|---|
-| `assign-pp-ticket-id` | Nuevo issue o edición humana | Asigna/conserva ID `PP-XXXX`, revalida campos, aplica prioridad media por defecto o como fallback seguro ante prioridad inválida y resincroniza labels operativas |
+| `assign-pp-ticket-id` | Nuevo issue o edición humana | Asigna/conserva ID `PP-XXXX`, revalida campos, aplica prioridad media por defecto o como fallback seguro ante prioridad inválida, marca validaciones incompletas y resincroniza labels operativas |
 | `inactivity-reminders` | Cada 8 h | Notifica issues inactivos según prioridad con pausa de 7 días tras actividad humana |
 
 ### Actividad humana
@@ -69,4 +71,4 @@ bash scripts/normalize_legacy_labels.sh
 - **Detalles o notas**: textarea
 - **Link / ID Ticket / Estado Anterior**: campos opcionales
 
-Cuando un ticket se edita, Codex-Connector vuelve a validar sus campos y mantiene sincronizadas las labels administradas (`prioridad:*`, `estado:*`, `sistema:*`, `solicitante:*`).
+Cuando un ticket se edita, Codex-Connector vuelve a validar sus campos y mantiene sincronizadas las labels administradas (`prioridad:*`, `estado:*`, `sistema:*`, `solicitante:*`, `validacion:*`).
