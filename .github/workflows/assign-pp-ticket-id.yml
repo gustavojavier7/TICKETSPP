@@ -178,13 +178,12 @@ jobs:
               return;
             }
 
-            const eventStamp = new Date(
-              issue.updated_at || Date.now()
-            ).toISOString();
+            const runId = process.env.GITHUB_RUN_ID || `${issue.number}-${issue.updated_at || Date.now()}`;
             const diffMarker =
-              `<!-- ticket-semantic-diff-v1:${eventStamp} -->`;
+              `<!-- ticket-semantic-diff-v1:run-${runId} -->`;
 
-            // Idempotencia ante reintentos del mismo evento.
+            // Idempotencia: dos eventos distintos tienen RUN_ID distinto;
+            // un reintento del mismo run conserva el mismo marcador.
             const comments = await github.paginate(
               github.rest.issues.listComments,
               {
