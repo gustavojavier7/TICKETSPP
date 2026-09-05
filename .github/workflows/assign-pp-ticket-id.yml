@@ -4,6 +4,7 @@ on:
   issues:
     types:
       - opened
+      - edited
 
 permissions:
   issues: write
@@ -11,6 +12,7 @@ permissions:
 jobs:
   assign_pp_id:
     name: Formalize and validate ticket
+    if: github.event.action == 'opened' || github.event.sender.type != 'Bot'
     runs-on: ubuntu-latest
 
     steps:
@@ -52,18 +54,6 @@ jobs:
             const body = issue.body || '';
             const ppId = process.env.PP_ID;
 
-            /*
-             * Extrae el contenido situado debajo de un encabezado Markdown
-             * generado por GitHub Issue Forms.
-             *
-             * Ejemplo:
-             *
-             * ### PRIORIDAD
-             *
-             * ALTA
-             *
-             * ### ESTADO DEL TICKET
-             */
             function extractField(heading) {
               const escapedHeading = heading.replace(
                 /[.*+?^${}()|[\]\\]/g,
@@ -88,6 +78,7 @@ jobs:
               if (
                 !value ||
                 /^_?no response_?$/i.test(value) ||
+                /^none$/i.test(value) ||
                 /^n\/?a$/i.test(value) ||
                 /^sin datos$/i.test(value)
               ) {
@@ -125,13 +116,6 @@ jobs:
               estado: extractField('ESTADO DEL TICKET')
             };
 
-            /*
-             * Valores permitidos por la plantilla.
-             *
-             * Tipo de falla es un campo nuevo:
-             * - su existencia todavía NO es obligatoria;
-             * - si está presente, sí se controla que el valor sea válido.
-             */
             const allowed = {
               solicitante: [
                 'GUSTAVO LOPEZ',
@@ -174,9 +158,6 @@ jobs:
 
             const errors = [];
 
-            /*
-             * Campos anteriores cuya existencia sí se valida.
-             */
             if (!fields.solicitante) {
               errors.push('Falta el campo **Solicitante**.');
             } else if (
@@ -234,10 +215,6 @@ jobs:
               );
             }
 
-            /*
-             * Campo nuevo: no genera alerta si está ausente.
-             * Solamente genera alerta si existe y contiene un valor desconocido.
-             */
             if (
               fields.tipoFalla &&
               !allowed.tipoFalla.includes(normalize(fields.tipoFalla))
@@ -247,10 +224,6 @@ jobs:
               );
             }
 
-            /*
-             * Construcción de etiquetas operativas.
-             * Esto permite que Inactivity Reminders encuentre la prioridad.
-             */
             const labelsToAdd = [
               'tipo:registrar-ticket'
             ];
@@ -297,10 +270,6 @@ jobs:
               );
             }
 
-            /*
-             * Conserva etiquetas no administradas y reemplaza solamente
-             * las categorías que controla este workflow.
-             */
             const managedPrefixes = [
               'prioridad:',
               'estado:',
@@ -334,35 +303,46 @@ jobs:
               labels: finalLabels
             });
 
-            /*
-             * Resultado de la formalización.
-             */
             const validationMarker =
               '<!-- codex-connector-ticket-validation-v1 -->';
+
+            const isHumanEdit =
+              context.payload.action === 'edited' &&
+              context.payload.sender?.type !== 'Bot';
+
+            const humanActivityMarker = isHumanEdit
+              ? `<!-- human-activity-v1:${new Date(
+                  issue.updated_at || Date.now()
+                ).toISOString()} -->`
+              : null;
 
             let commentBody;
 
             if (errors.length > 0) {
               commentBody = [
                 validationMarker,
+                humanActivityMarker,
                 `⚠️ **Codex-Connector: validación incompleta**`,
                 '',
-                `El ticket **${ppId}** fue creado, pero no pudo formalizarse completamente.`,
+                `El ticket **${ppId}** fue creado o actualizado, pero no pudo formalizarse completamente.`,
                 '',
                 '### Datos que deben corregirse',
                 ...errors.map(error => `- ${error}`),
                 '',
                 'Editá el contenido del ticket y corregí los campos indicados.',
                 '',
+                'Al guardar la edición, Codex-Connector volverá a validar y sincronizar las etiquetas automáticamente.',
+                '',
                 'Los recordatorios y clasificaciones automáticas pueden quedar incompletos hasta que el ticket sea válido.'
-              ].join('\n');
+              ].filter(Boolean).join('\n');
             } else {
               const tipoFallaStatus = fields.tipoFalla
                 ? `\`${fields.tipoFalla}\``
-                : 'no informado — todavía opcional';
+                : 'no informado — opcional';
 
               commentBody = [
                 validationMarker,
+                humanActivityMarker,
                 `✅ **Codex-Connector: ticket formalizado**`,
                 '',
                 `Identificador asignado: **${ppId}**`,
@@ -376,12 +356,41 @@ jobs:
                 `- Descripción: válida`,
                 '',
                 'Las etiquetas operativas fueron sincronizadas automáticamente.'
-              ].join('\n');
+              ].filter(Boolean).join('\n');
             }
 
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue.number,
-              body: commentBody
-            });
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                per_page: 100
+              }
+            );
+
+            const validationComment = comments
+              .filter(comment =>
+                (comment.body || '').includes(validationMarker)
+              )
+              .sort(
+                (a, b) =>
+                  new Date(b.created_at).getTime() -
+                  new Date(a.created_at).getTime()
+              )[0];
+
+            if (validationComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: validationComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: commentBody
+              });
+            }
