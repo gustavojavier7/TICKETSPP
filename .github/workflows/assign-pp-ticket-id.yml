@@ -116,6 +116,11 @@ jobs:
               estado: extractField('ESTADO DEL TICKET')
             };
 
+            const priorityWasDefaulted = !fields.prioridad;
+            const effectivePriority = priorityWasDefaulted
+              ? 'MEDIA'
+              : fields.prioridad;
+
             const allowed = {
               solicitante: [
                 'GUSTAVO LOPEZ',
@@ -195,9 +200,8 @@ jobs:
               }
             }
 
-            if (!fields.prioridad) {
-              errors.push('Falta el campo **PRIORIDAD**.');
-            } else if (
+            if (
+              fields.prioridad &&
               !allowed.prioridad.includes(normalize(fields.prioridad))
             ) {
               errors.push(
@@ -248,7 +252,7 @@ jobs:
               CCURE: 'sistema:ccure'
             };
 
-            const normalizedPriority = normalize(fields.prioridad);
+            const normalizedPriority = normalize(effectivePriority);
             const normalizedState = normalize(fields.estado);
             const normalizedSystem = normalize(fields.sistema);
 
@@ -316,6 +320,10 @@ jobs:
                 ).toISOString()} -->`
               : null;
 
+            const defaultPriorityNote = priorityWasDefaulted
+              ? 'ℹ️ **Prioridad asignada automáticamente:** `MEDIA` (`prioridad:media`) porque el ticket no definía una prioridad.'
+              : null;
+
             let commentBody;
 
             if (errors.length > 0) {
@@ -326,6 +334,8 @@ jobs:
                 '',
                 `El ticket **${ppId}** fue creado o actualizado, pero no pudo formalizarse completamente.`,
                 '',
+                defaultPriorityNote,
+                defaultPriorityNote ? '' : null,
                 '### Datos que deben corregirse',
                 ...errors.map(error => `- ${error}`),
                 '',
@@ -340,6 +350,10 @@ jobs:
                 ? `\`${fields.tipoFalla}\``
                 : 'no informado — opcional';
 
+              const priorityStatus = priorityWasDefaulted
+                ? '`MEDIA` — asignada automáticamente'
+                : `\`${fields.prioridad}\``;
+
               commentBody = [
                 validationMarker,
                 humanActivityMarker,
@@ -350,11 +364,13 @@ jobs:
                 '### Validación',
                 `- Solicitante: \`${fields.solicitante}\``,
                 `- Sistema afectado: \`${fields.sistema}\``,
-                `- Prioridad: \`${fields.prioridad}\``,
+                `- Prioridad: ${priorityStatus}`,
                 `- Estado: \`${fields.estado}\``,
                 `- Tipo de falla: ${tipoFallaStatus}`,
                 `- Descripción: válida`,
                 '',
+                defaultPriorityNote,
+                defaultPriorityNote ? '' : null,
                 'Las etiquetas operativas fueron sincronizadas automáticamente.'
               ].filter(Boolean).join('\n');
             }
