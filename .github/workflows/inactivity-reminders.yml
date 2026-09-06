@@ -95,6 +95,13 @@ jobs:
               }
             };
 
+            const PRIORITY_FROM_BODY = {
+              URGENTE: 'prioridad:urgente',
+              ALTA: 'prioridad:alta',
+              MEDIA: 'prioridad:media',
+              BAJA: 'prioridad:baja'
+            };
+
             const auditLog = [];
 
             const counters = {
@@ -105,6 +112,8 @@ jobs:
               skippedPullRequests: 0,
               skippedClosedLabel: 0,
               missingPriority: 0,
+              priorityRepairedFromBody: 0,
+              priorityDefaulted: 0,
               insufficientInactivity: 0,
               pausedByHuman: 0,
               pausedByAutomation: 0,
@@ -140,6 +149,19 @@ jobs:
             function timeMs(value) {
               const parsed = new Date(value).getTime();
               return Number.isFinite(parsed) ? parsed : null;
+            }
+
+            function priorityFromIssueBody(body) {
+              const text = body || '';
+              const match = text.match(
+                /###\s+PRIORIDAD\s*\n+\s*(URGENTE|ALTA|MEDIA|BAJA)\b/i
+              );
+
+              if (!match) {
+                return null;
+              }
+
+              return PRIORITY_FROM_BODY[match[1].toUpperCase()] || null;
             }
 
             function writeDecision(entry) {
@@ -250,21 +272,61 @@ jobs:
                 continue;
               }
 
-              const priorityLabel = Object.keys(cfg)
+              let priorityLabel = Object.keys(cfg)
                 .find(priority => labels.includes(priority));
 
               if (!priorityLabel) {
                 counters.missingPriority++;
 
-                writeDecision({
-                  issue: issue.number,
-                  title: issue.title,
-                  decision: 'NO_ELEGIBLE',
-                  reason: 'falta_etiqueta_prioridad',
-                  labels
-                });
+                const priorityInBody = priorityFromIssueBody(issue.body);
+                const repairedPriority =
+                  priorityInBody || 'prioridad:media';
+                const repairReason = priorityInBody
+                  ? 'prioridad_reparada_desde_cuerpo'
+                  : 'prioridad_media_por_defecto';
 
-                continue;
+                try {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    labels: [repairedPriority]
+                  });
+
+                  labels.push(repairedPriority);
+                  priorityLabel = repairedPriority;
+
+                  if (priorityInBody) {
+                    counters.priorityRepairedFromBody++;
+                  } else {
+                    counters.priorityDefaulted++;
+                  }
+
+                  writeDecision({
+                    issue: issue.number,
+                    title: issue.title,
+                    decision: 'REPARADO',
+                    reason: repairReason,
+                    priority: repairedPriority
+                  });
+                } catch (error) {
+                  counters.errors++;
+
+                  writeDecision({
+                    issue: issue.number,
+                    title: issue.title,
+                    decision: 'ERROR',
+                    reason: 'error_reparando_prioridad',
+                    priority: repairedPriority,
+                    message: error.message
+                  });
+
+                  core.error(
+                    `Issue #${issue.number}: no se pudo reparar prioridad: ${error.stack || error.message}`
+                  );
+
+                  continue;
+                }
               }
 
               const {
@@ -654,7 +716,19 @@ jobs:
             );
 
             core.info(
-              `Sin prioridad: ${counters.missingPriority}`
+              `Prioridad ausente detectada: ${counters.missingPriority}`
+            );
+
+            core.info(
+              `Prioridades reparadas desde cuerpo: ${
+                counters.priorityRepairedFromBody
+              }`
+            );
+
+            core.info(
+              `Prioridades asignadas por defecto: ${
+                counters.priorityDefaulted
+              }`
             );
 
             core.info(
@@ -703,8 +777,16 @@ jobs:
                   String(counters.normalNotified)
                 ],
                 [
-                  'Sin etiqueta de prioridad',
+                  'Prioridad ausente detectada',
                   String(counters.missingPriority)
+                ],
+                [
+                  'Prioridad reparada desde el cuerpo',
+                  String(counters.priorityRepairedFromBody)
+                ],
+                [
+                  'Prioridad media asignada por defecto',
+                  String(counters.priorityDefaulted)
                 ],
                 [
                   'Inactividad insuficiente',
