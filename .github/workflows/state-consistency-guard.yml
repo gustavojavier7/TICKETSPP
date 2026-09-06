@@ -24,11 +24,20 @@ jobs:
             const CLOSED_LABEL = 'estado:cerrado';
             const STATE_PREFIX = 'estado:';
 
+            const STATE_FROM_BODY = {
+              ABIERTO: 'estado:abierto',
+              'EN CURSO': 'estado:en-curso',
+              'ESPERANDO RESPUESTA': 'estado:esperando-respuesta'
+            };
+
             const counters = {
               checked: 0,
               consistent: 0,
               closedLabelRepaired: 0,
               issueClosedFromLabel: 0,
+              bodyStateRepaired: 0,
+              missingBodyState: 0,
+              multipleStateLabels: 0,
               inconsistent: 0,
               errors: 0
             };
@@ -41,7 +50,20 @@ jobs:
                 .filter(Boolean);
             }
 
-            function canonicalClosedLabels(labels) {
+            function stateFromIssueBody(body) {
+              const text = body || '';
+              const match = text.match(
+                /###\s+ESTADO DEL TICKET\s*\n+\s*(ABIERTO|EN CURSO|ESPERANDO RESPUESTA)\b/i
+              );
+
+              if (!match) {
+                return null;
+              }
+
+              return STATE_FROM_BODY[match[1].toUpperCase()] || null;
+            }
+
+            function canonicalLabels(labels, targetStateLabel) {
               const preserved = labels.filter(label =>
                 !label.toLowerCase().startsWith(STATE_PREFIX)
               );
@@ -49,7 +71,7 @@ jobs:
               return [
                 ...new Set([
                   ...preserved,
-                  CLOSED_LABEL
+                  targetStateLabel
                 ])
               ];
             }
@@ -132,8 +154,6 @@ jobs:
               /*
                * Regla A:
                * GitHub CLOSED es fuente de verdad para un Issue ya cerrado.
-               * Si falta estado:cerrado o convive con otra estado:*, primero
-               * se notifica y luego se deja únicamente estado:cerrado.
                */
               if (issue.state === 'closed' && !hasCanonicalClosedState) {
                 counters.inconsistent++;
@@ -142,7 +162,7 @@ jobs:
                   `<!-- ${REPAIR_MARKER} -->`,
                   '⚠️ **Inconsistencia de estado detectada**',
                   '',
-                  `El Issue está **closed** en GitHub, pero sus etiquetas de estado no eran canónicas.`,
+                  'El Issue está **closed** en GitHub, pero sus etiquetas de estado no eran canónicas.',
                   '',
                   `Etiquetas de estado detectadas: ${
                     previousStateLabels.length > 0
@@ -150,9 +170,7 @@ jobs:
                       : 'ninguna'
                   }.`,
                   '',
-                  `🔧 **Acción automática iniciada:** reemplazar cualquier etiqueta \`${STATE_PREFIX}*\` por \`${CLOSED_LABEL}\`.`,
-                  '',
-                  'Este aviso se genera antes de la reparación para que una falla de automatización nunca vuelva silenciosa la inconsistencia.'
+                  `🔧 **Acción automática iniciada:** reemplazar cualquier etiqueta \`${STATE_PREFIX}*\` por \`${CLOSED_LABEL}\`.`
                 ].join('\n');
 
                 let commentId = null;
@@ -164,7 +182,7 @@ jobs:
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     issue_number: issue.number,
-                    labels: canonicalClosedLabels(labelsBefore)
+                    labels: canonicalLabels(labelsBefore, CLOSED_LABEL)
                   });
 
                   const successBody = [
@@ -173,41 +191,18 @@ jobs:
                     '',
                     'El Issue ya estaba **closed** en GitHub, pero sus etiquetas de estado eran inconsistentes.',
                     '',
-                    'Estado nativo de GitHub: `closed`',
-                    `Etiquetas de estado anteriores: ${
-                      previousStateLabels.length > 0
-                        ? previousStateLabels.map(label => `\`${label}\``).join(', ')
-                        : 'ninguna'
-                    }`,
-                    `Acción realizada: se eliminó cualquier \`${STATE_PREFIX}*\` anterior y se asignó \`${CLOSED_LABEL}\`.`,
-                    '',
-                    'El ticket queda excluido correctamente del monitoreo de inactividad por estar cerrado.'
+                    `Acción realizada: se eliminó cualquier \`${STATE_PREFIX}*\` anterior y se asignó \`${CLOSED_LABEL}\`.`
                   ].join('\n');
 
                   await updateRepairComment(commentId, successBody);
-
                   counters.closedLabelRepaired++;
-                  core.info(
-                    `Issue #${issue.number}: labels reconciliadas -> ${CLOSED_LABEL}`
-                  );
                 } catch (error) {
                   counters.errors++;
-                  core.error(
-                    `Issue #${issue.number}: fallo al reconciliar labels de cierre: ${error.message}`
-                  );
-
                   await markFailure(
                     commentId,
                     issue,
-                    `El Issue está **closed** en GitHub y debería conservar únicamente \`${CLOSED_LABEL}\` como etiqueta de estado.`,
-                    [
-                      `Etiquetas de estado detectadas: ${
-                        previousStateLabels.length > 0
-                          ? previousStateLabels.map(label => `\`${label}\``).join(', ')
-                          : 'ninguna'
-                      }.`,
-                      `Error: \`${error.message}\``
-                    ]
+                    `El Issue está **closed** en GitHub y debería conservar únicamente \`${CLOSED_LABEL}\`.`,
+                    [`Error: \`${error.message}\``]
                   );
                 }
 
@@ -216,10 +211,7 @@ jobs:
 
               /*
                * Regla B:
-               * estado:cerrado es una orden operativa de cierre.
-               * Si el Issue sigue OPEN, primero se notifica y luego se
-               * cierra el Issue. También se limpian labels estado:*
-               * contradictorias para dejar sólo estado:cerrado.
+               * estado:cerrado sobre un Issue OPEN es una orden operativa de cierre.
                */
               if (issue.state === 'open' && hasClosedLabel) {
                 counters.inconsistent++;
@@ -230,13 +222,7 @@ jobs:
                   '',
                   `El Issue seguía **open** en GitHub, pero tenía la etiqueta operativa \`${CLOSED_LABEL}\`.`,
                   '',
-                  `Etiquetas de estado detectadas: ${
-                    previousStateLabels.map(label => `\`${label}\``).join(', ')
-                  }.`,
-                  '',
-                  '🔧 **Acción automática iniciada:** cerrar el Issue en GitHub y conservar únicamente la etiqueta canónica `estado:cerrado`.',
-                  '',
-                  'Este aviso se genera antes del cierre para que la transición nunca ocurra de forma silenciosa.'
+                  '🔧 **Acción automática iniciada:** cerrar el Issue y conservar únicamente `estado:cerrado`.'
                 ].join('\n');
 
                 let commentId = null;
@@ -255,7 +241,7 @@ jobs:
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     issue_number: issue.number,
-                    labels: canonicalClosedLabels(labelsBefore)
+                    labels: canonicalLabels(labelsBefore, CLOSED_LABEL)
                   });
 
                   const successBody = [
@@ -266,41 +252,122 @@ jobs:
                     '',
                     'Acciones realizadas:',
                     '- El Issue fue cerrado automáticamente en GitHub.',
-                    `- Se eliminaron labels \`${STATE_PREFIX}*\` contradictorias y se conservó \`${CLOSED_LABEL}\`.`,
-                    '',
-                    'Estado final de GitHub: `closed`',
-                    `Estado operativo final: \`${CLOSED_LABEL}\``,
-                    '',
-                    'El ticket queda excluido correctamente del monitoreo de inactividad.'
+                    `- Se eliminaron labels \`${STATE_PREFIX}*\` contradictorias y se conservó \`${CLOSED_LABEL}\`.`
                   ].join('\n');
 
                   await updateRepairComment(commentId, successBody);
-
                   counters.issueClosedFromLabel++;
-                  core.info(
-                    `Issue #${issue.number}: cerrado automáticamente por ${CLOSED_LABEL}`
-                  );
                 } catch (error) {
                   counters.errors++;
-                  core.error(
-                    `Issue #${issue.number}: fallo al cerrar desde label: ${error.message}`
-                  );
-
                   await markFailure(
                     commentId,
                     issue,
                     `El Issue estaba **open** en GitHub pero tenía \`${CLOSED_LABEL}\`.`,
-                    [
-                      'Acción esperada: cerrar el Issue y conservar únicamente `estado:cerrado`.',
-                      `Error: \`${error.message}\``
-                    ]
+                    [`Error: \`${error.message}\``]
                   );
                 }
 
                 continue;
               }
 
-              counters.consistent++;
+              if (issue.state !== 'open') {
+                counters.consistent++;
+                continue;
+              }
+
+              const expectedStateLabel = stateFromIssueBody(issue.body);
+
+              if (!expectedStateLabel) {
+                counters.missingBodyState++;
+                counters.errors++;
+
+                core.error(
+                  `Issue #${issue.number}: no se pudo obtener un estado válido desde el cuerpo.`
+                );
+
+                continue;
+              }
+
+              /*
+               * Regla C - Fallar Primero:
+               * más de una etiqueta estado:* es una contradicción estructural.
+               * No se adivina cuál era la intención; se registra el error.
+               */
+              if (previousStateLabels.length > 1) {
+                counters.multipleStateLabels++;
+                counters.inconsistent++;
+                counters.errors++;
+
+                core.error(
+                  `Issue #${issue.number}: múltiples etiquetas de estado: ${previousStateLabels.join(', ')}`
+                );
+
+                continue;
+              }
+
+              const currentStateLabel = previousStateLabels[0] || null;
+
+              if (currentStateLabel === expectedStateLabel) {
+                counters.consistent++;
+                continue;
+              }
+
+              counters.inconsistent++;
+
+              const detectionBody = [
+                `<!-- ${REPAIR_MARKER} -->`,
+                '⚠️ **Inconsistencia entre estado declarado y etiqueta detectada**',
+                '',
+                `Estado declarado en \`### ESTADO DEL TICKET\`: \`${expectedStateLabel}\`.`,
+                `Etiqueta de estado actual: ${
+                  currentStateLabel ? `\`${currentStateLabel}\`` : 'ninguna'
+                }.`,
+                '',
+                `🔧 **Acción automática iniciada:** dejar únicamente \`${expectedStateLabel}\`.`
+              ].join('\n');
+
+              let commentId = null;
+
+              try {
+                commentId = await createRepairComment(issue, detectionBody);
+
+                await github.rest.issues.setLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: canonicalLabels(labelsBefore, expectedStateLabel)
+                });
+
+                const successBody = [
+                  `<!-- ${REPAIR_MARKER} -->`,
+                  '✅ **Estado operativo reconciliado automáticamente**',
+                  '',
+                  `Fuente usada: \`### ESTADO DEL TICKET\` del cuerpo del Issue.`,
+                  `Etiqueta anterior: ${
+                    currentStateLabel ? `\`${currentStateLabel}\`` : 'ninguna'
+                  }.`,
+                  `Etiqueta final: \`${expectedStateLabel}\`.`
+                ].join('\n');
+
+                await updateRepairComment(commentId, successBody);
+                counters.bodyStateRepaired++;
+
+                core.info(
+                  `Issue #${issue.number}: estado reconciliado -> ${expectedStateLabel}`
+                );
+              } catch (error) {
+                counters.errors++;
+
+                await markFailure(
+                  commentId,
+                  issue,
+                  'No se pudo reconciliar la etiqueta de estado con el valor declarado en el cuerpo.',
+                  [
+                    `Estado esperado: \`${expectedStateLabel}\`.`,
+                    `Error: \`${error.message}\``
+                  ]
+                );
+              }
             }
 
             core.info(
@@ -309,6 +376,9 @@ jobs:
               `inconsistentes=${counters.inconsistent}, ` +
               `labels_cierre_reparadas=${counters.closedLabelRepaired}, ` +
               `issues_cerrados_por_label=${counters.issueClosedFromLabel}, ` +
+              `estados_reparados_desde_cuerpo=${counters.bodyStateRepaired}, ` +
+              `estado_cuerpo_invalido=${counters.missingBodyState}, ` +
+              `multiples_labels_estado=${counters.multipleStateLabels}, ` +
               `errores=${counters.errors}`
             );
 
