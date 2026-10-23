@@ -99,3 +99,19 @@ No sonar como auditoría burocrática. El objetivo es ayudar a que Gustavo y el 
 ## Resumen para Codex Review
 
 Si Codex Review lee este archivo: este repositorio debe revisarse como un tablero operativo de tickets. Antes de comentar sobre calidad de código, revisar workflows e Issues y comentar sobre riesgos, prioridades, estados, recordatorios y continuidad operativa.
+
+## Cursor Cloud specific instructions
+
+No hay aplicación web ni servidor local. El trabajo es el tablero de Issues y los workflows de GitHub Actions. `gh`, `jq` y Node vienen en la imagen. El `install` del entorno agrega `actionlint`, `shellcheck` y `yamllint`.
+
+Comandos de verificación, sin escribir en GitHub:
+
+```bash
+actionlint .github/workflows/*.yml
+shellcheck scripts/*.sh
+yamllint -d '{extends: relaxed, rules: {document-start: disable, truthy: disable, line-length: disable}}' .github
+```
+
+Los scripts embebidos de `actions/github-script` usan `await` y `return` de nivel superior. Para revisarlos con Node, extraer cada bloque `script: |` y envolverlo en `async function __workflow() { ... }` antes de `node --check`.
+
+`scripts/sync_labels.sh` y `scripts/normalize_legacy_labels.sh` modifican labels del repositorio real. No ejecutarlos desde un agente salvo pedido explícito. Para mirar el tablero, usar solo lectura: `gh issue list --repo gustavojavier7/TICKETSPP` y `gh label list --repo gustavojavier7/TICKETSPP --limit 200`.
